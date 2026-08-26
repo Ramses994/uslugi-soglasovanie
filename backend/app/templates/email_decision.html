@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f2f4f7;font-family:Segoe UI, Arial, sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);">
+        <tr><td style="background:{{ '#1b8a4c' if status == 'approved' else ('#c0392b' if status == 'rejected' else '#0f3d73') }};padding:20px 28px;">
+          <span style="color:#fff;font-size:18px;font-weight:600;">
+            {% if status == 'approved' %}Заявка полностью согласована{% elif status == 'rejected' %}Заявка отклонена{% else %}Обновление статуса заявки{% endif %}
+          </span>
+        </td></tr>
+        <tr><td style="padding:24px 28px;">
+          <p style="margin:0 0 12px 0;color:#1a1a1a;font-size:14px;">
+            Услуга «<b>{{ service_name }}</b>» (заявка №{{ request_id[:8] }}).
+          </p>
+          <p style="margin:0 0 12px 0;color:#1a1a1a;font-size:14px;">
+            <b>{{ approver_name }}</b> ({{ approver_role }}): <b>{{ "Согласовано" if decision == "approve" else "Отклонено" }}</b>
+            {% if comment %}<br>Комментарий: {{ comment }}{% endif %}
+          </p>
+          {% if status == 'approved' %}
+          <p style="margin:0;color:#1a1a1a;font-size:14px;">
+            Все согласующие подтвердили заявку. Файл для импорта в МИС «Медиалог» приложен к этому письму
+            (администратор МИС может подгрузить его через меню «Услуги / Импорт прейскуранта услуг»).
+          </p>
+          {% elif status == 'rejected' %}
+          <p style="margin:0;color:#1a1a1a;font-size:14px;">Заявка остановлена и требует доработки инициатором.</p>
+          {% else %}
+          <p style="margin:0;color:#1a1a1a;font-size:14px;">Ожидаются решения остальных согласующих.</p>
+          {% endif %}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

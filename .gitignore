@@ -1,0 +1,22 @@
+# Секреты — никогда не коммитить
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Данные, которые растут/меняются в рантайме — не часть кода
+data/*.db
+data/*.db-journal
+
+# Node (нужен только для локальной пересборки frontend/vendor/*, см. frontend/vendor/README.md)
+node_modules/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

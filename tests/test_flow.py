@@ -1,0 +1,252 @@
+"""
+Регресс-тесты для сценариев, которые проверялись вручную при разработке
+(раздел 12 ТЗ.md). Каждый тест — это ровно тот сценарий, который был пройден
+руками, только теперь автоматически и с падением при регрессии.
+
+Запуск:
+    pip install -r requirements-dev.txt
+    pytest tests/ -v
+"""
+import io
+import re
+import sys
+from pathlib import Path
+
+import openpyxl
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "backend"))
+
+from app.services.dictionaries import store  # noqa: E402
+from conftest import SAMPLE_REQUEST_PAYLOAD  # noqa: E402
+
+
+def _extract_action_url(html: str, action: str) -> str:
+    m = re.search(rf'href="([^"]*?/api/approvals/[^"]+?/{action})"', html)
+    assert m, f"Не нашли ссылку '{action}' в письме:\n{html[:500]}"
+    return m.group(1)
+
+
+# ---------------------------------------------------------------------------
+# 12.1 — загрузка справочников из реальных файлов (ЕРЛУ-КДЛ, номенклатура Минздрава)
+# ---------------------------------------------------------------------------
+
+class TestDictionaries:
+    def test_erlu_loaded_from_real_file(self):
+        # Регресс-тест на баг из раздела 7.2/12.1: если кто-то случайно вернёт
+        # read_only=True в load_minzdrav или сломает парсинг load_erlu,
+        # количество загруженных строк упадёт до 0 или станет подозрительно малым.
+        assert len(store.erlu) > 1000, "ЕРЛУ-КДЛ должен содержать больше 1000 анализов"
+
+    def test_minzdrav_loaded_from_real_file(self):
+        assert len(store.minzdrav) > 10000, (
+            "Справочник Минздрава должен содержать больше 10000 записей — "
+            "0 записей означает регрессию бага с битым <dimension> в XLSX (раздел 7.2 ТЗ.md)"
+        )
+
+    def test_search_erlu_finds_known_analysis(self):
+        results = store.search_erlu("клинический анализ крови")
+        codes = {r.erlu_code for r in results}
+        assert "01.00.002" in codes
+        match = next(r for r in results if r.erlu_code == "01.00.002")
+        assert match.lab_code == "1.0.D1.202"
+
+    def test_search_minzdrav_finds_known_code(self):
+        results = store.search_minzdrav("офтальмометрия")
+        assert results and results[0].code == "A03.26.009"
+
+    def test_best_minzdrav_match_for_service_name(self):
+        match = store.best_minzdrav_match("Приём врача-терапевта повторный")
+        assert match is not None
+        assert match.code == "B01.047.002"
+
+
+# ---------------------------------------------------------------------------
+# Аутентификация
+# ---------------------------------------------------------------------------
+
+class TestAuth:
+    def test_login_mock_and_me(self, client):
+        r = client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        assert r.status_code == 200
+        profile = r.json()
+        assert profile["login"] == "ivanov"
+        assert profile["email"] == "ivanov@clinic.local"
+
+        r_me = client.get("/api/auth/me")
+        assert r_me.status_code == 200
+        assert r_me.json()["login"] == "ivanov"
+
+    def test_me_without_session_is_401(self, client):
+        r = client.get("/api/auth/me")
+        assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 12.2 — полный цикл: заявка → согласование → статус
+# ---------------------------------------------------------------------------
+
+class TestApprovalFlow:
+    def test_submit_sends_email_to_each_approver(self, logged_in_client):
+        r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
+        assert r.status_code == 201
+        body = r.json()
+        assert body["status"] == "pending"
+
+        assert len(logged_in_client.sent_emails) == 2
+        recipients = {tuple(m["to"]) for m in logged_in_client.sent_emails}
+        assert ("chief.doctor@clinic.local",) in recipients
+        assert ("mis.admin@clinic.local",) in recipients
+
+    def test_full_approval_changes_status_and_generates_import_file(self, logged_in_client):
+        r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
+        request_id = r.json()["id"]
+
+        emails = logged_in_client.sent_emails
+        approve_chief = _extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve")
+        approve_mis = _extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve")
+
+        # первое согласование — статус ещё pending, ждём второго
+        r1 = logged_in_client.get(approve_chief)
+        assert r1.status_code == 200
+        status_after_1 = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
+        assert status_after_1 == "pending"
+
+        # второе согласование — все согласовали, статус approved + письмо с файлом импорта
+        r2 = logged_in_client.get(approve_mis)
+        assert r2.status_code == 200
+        status_after_2 = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
+        assert status_after_2 == "approved"
+
+        attachment_mails = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert len(attachment_mails) == 1
+        wb = openpyxl.load_workbook(io.BytesIO(attachment_mails[0]["attachment_bytes"]))
+        ws = wb.active
+        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        assert header[:3] == ["CODE", "INSURANCE_TYPE", "LABEL"]
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        # 2 филиала x (ДМС+ОМС, т.к. price_list='both') = 4 строки
+        assert len(rows) == 4
+        assert all(row[2] == "Приём врача-терапевта повторный" for row in rows)
+        assert all(row[19] == "B01.047.002" for row in rows)  # MINZDRAV_CODE
+
+    def test_repeat_click_on_same_link_is_idempotent(self, logged_in_client):
+        r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
+        request_id = r.json()["id"]
+        approve_chief = _extract_action_url(_html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "approve")
+
+        logged_in_client.get(approve_chief)
+        mails_after_first_click = len(logged_in_client.sent_emails)
+
+        r_repeat = logged_in_client.get(approve_chief)
+        assert r_repeat.status_code == 200
+        assert "уже зафиксировано" in r_repeat.text.lower() or "уже отметили" in r_repeat.text.lower()
+        # повторный клик не должен рассылать повторных уведомлений
+        assert len(logged_in_client.sent_emails) == mails_after_first_click
+
+        status = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
+        assert status == "pending"  # второй согласующий ещё не решил
+
+    def test_reject_stops_the_request(self, logged_in_client):
+        r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
+        request_id = r.json()["id"]
+        reject_chief = _extract_action_url(_html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject")
+
+        r_reject = logged_in_client.get(reject_chief)
+        assert r_reject.status_code == 200
+
+        status = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
+        assert status == "rejected"
+
+
+def _html_of(sent_emails: list[dict], recipient: str) -> str:
+    """Находит письмо, адресованное recipient, и возвращает его HTML-тело
+    (conftest.py::fake_send / fake_send_with_attachment сохраняют его как есть,
+    без реальной отправки — см. docstring в conftest.py)."""
+    match = next(m for m in sent_emails if recipient in m["to"])
+    return match["html_body"]
+
+
+# ---------------------------------------------------------------------------
+# Валидация
+# ---------------------------------------------------------------------------
+
+class TestValidation:
+    def test_lab_service_without_lab_block_is_rejected(self, logged_in_client):
+        payload = dict(SAMPLE_REQUEST_PAYLOAD)
+        payload["is_lab_service"] = True
+        payload["lab"] = None
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+
+    def test_unknown_approver_returns_400(self, logged_in_client):
+        payload = dict(SAMPLE_REQUEST_PAYLOAD)
+        payload["approver_ids"] = ["does_not_exist"]
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 400
+
+    def test_age_from_greater_than_age_to_is_rejected(self, logged_in_client):
+        payload = dict(SAMPLE_REQUEST_PAYLOAD)
+        payload["age_from"] = 50
+        payload["age_to"] = 10
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Роль «Администратор формы» (FORM_ADMIN_LOGINS в .env.example содержит "ivanov",
+# тестовый mock-пользователь "petrova" в него не входит — используем обоих,
+# чтобы проверить и допуск, и отказ)
+# ---------------------------------------------------------------------------
+
+class TestAdminRole:
+    def test_regular_user_is_not_admin_and_gets_403(self, client):
+        r = client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        assert r.json()["is_admin"] is False
+
+        assert client.get("/api/admin/approvers").status_code == 403
+        assert client.get("/api/admin/branches").status_code == 403
+        assert client.post("/api/dictionaries/reload").status_code == 403
+
+    def test_admin_user_flag_is_true(self, logged_in_client):
+        # logged_in_client логинится как "ivanov" — он в FORM_ADMIN_LOGINS
+        me = logged_in_client.get("/api/auth/me").json()
+        assert me["is_admin"] is True
+
+    def test_admin_can_crud_approvers(self, logged_in_client):
+        new_approver = {"id": "test_approver", "name": "Тест Тестов", "email": "test@clinic.local",
+                         "role": "Тестовая роль", "required_for": ["all"]}
+        r = logged_in_client.post("/api/admin/approvers", json=new_approver)
+        assert r.status_code == 201
+
+        listed = logged_in_client.get("/api/admin/approvers").json()
+        assert any(a["id"] == "test_approver" for a in listed)
+
+        # новый согласующий сразу виден и в обычном (не только admin) списке для формы
+        public_listed = logged_in_client.get("/api/dictionaries/approvers").json()
+        assert any(a["id"] == "test_approver" for a in public_listed)
+
+        r_dup = logged_in_client.post("/api/admin/approvers", json=new_approver)
+        assert r_dup.status_code == 400  # дубликат id
+
+        r_update = logged_in_client.put("/api/admin/approvers/test_approver",
+                                         json={**new_approver, "role": "Обновлённая роль"})
+        assert r_update.status_code == 200
+        assert r_update.json()["role"] == "Обновлённая роль"
+
+        r_delete = logged_in_client.delete("/api/admin/approvers/test_approver")
+        assert r_delete.status_code == 204
+        assert logged_in_client.delete("/api/admin/approvers/test_approver").status_code == 404
+
+    def test_admin_can_crud_branches(self, logged_in_client):
+        new_branch = {"id": "test_branch", "name": "Тестовый филиал"}
+        r = logged_in_client.post("/api/admin/branches", json=new_branch)
+        assert r.status_code == 201
+
+        public_branches = logged_in_client.get("/api/dictionaries/branches").json()
+        assert "Тестовый филиал" in public_branches
+
+        logged_in_client.delete("/api/admin/branches/test_branch")
+        public_branches_after = logged_in_client.get("/api/dictionaries/branches").json()
+        assert "Тестовый филиал" not in public_branches_after

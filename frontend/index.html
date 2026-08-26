@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Согласование услуг — МИС Медиалог</title>
+<!--
+  ВАЖНО: Tailwind и Alpine.js подключены из локальных файлов (frontend/vendor/), а НЕ
+  с публичных CDN (cdn.tailwindcss.com, cdn.jsdelivr.net). Это не стилистический выбор —
+  без этого форма представляет собой ПОЛНОСТЬЮ ПУСТУЮ БЕЛУЮ СТРАНИЦУ на любой машине без
+  выхода в интернет (а внутренняя сеть клиники, где крутятся AD/SMTP/МИС, очень часто
+  и не имеет прямого выхода в публический интернет — это и было воспроизведено при
+  smoke-тестировании: см. раздел 12.7 ТЗ.md). Alpine без CDN не инициализируется → все
+  x-data/x-show/x-if/x-model не работают → показывается пустой <body>. tailwind.css
+  собран статически (frontend/vendor/README.md — как пересобрать после правки классов
+  в этом файле или в app.js).
+-->
+<link rel="stylesheet" href="vendor/tailwind.css">
+<script defer src="vendor/alpine.min.js"></script>
+<style>
+  body { font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+  [x-cloak] { display: none !important; }
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+
+<div x-data="app()" x-init="init()" x-cloak>
+
+  <!-- ============ ЭКРАН ЛОГИНА ============ -->
+  <template x-if="!user">
+    <div class="min-h-screen flex items-center justify-center px-4">
+      <div class="card w-full max-w-sm">
+        <div class="text-center mb-6">
+          <div class="mx-auto w-12 h-12 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-lg mb-3">М</div>
+          <h1 class="text-lg font-semibold text-slate-900">Согласование прейскуранта</h1>
+          <p class="text-sm text-slate-500 mt-1">Войдите с доменной учётной записью</p>
+        </div>
+        <form @submit.prevent="login()">
+          <label class="field-label">Логин (домен\\пользователь или пользователь)</label>
+          <input class="input mb-3" x-model="loginForm.login" placeholder="clinic\\ivanov" required>
+          <label class="field-label">Пароль</label>
+          <input class="input mb-4" type="password" x-model="loginForm.password" required>
+          <button class="btn-primary w-full justify-center" type="submit" :disabled="loading">
+            <span x-show="!loading">Войти</span>
+            <span x-show="loading">Проверка…</span>
+          </button>
+          <p x-show="loginError" x-text="loginError" class="text-red-600 text-xs mt-3"></p>
+        </form>
+      </div>
+    </div>
+  </template>
+
+  <!-- ============ ОСНОВНОЕ ПРИЛОЖЕНИЕ ============ -->
+  <template x-if="user">
+    <div>
+      <!-- Шапка -->
+      <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
+        <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold">М</div>
+            <div>
+              <div class="text-sm font-semibold text-slate-900">Форма согласования услуг</div>
+              <div class="text-xs text-slate-500">МИС «Медиалог» 8.10.04.R</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-sm">
+            <div class="text-right hidden sm:block">
+              <div class="font-medium text-slate-800" x-text="user.display_name"></div>
+              <div class="text-xs text-slate-500" x-text="[user.position, user.department].filter(Boolean).join(' · ')"></div>
+            </div>
+            <button class="btn-secondary !px-3 !py-1.5" @click="logout()">Выйти</button>
+          </div>
+        </div>
+
+        <!-- Вкладки -->
+        <div class="max-w-4xl mx-auto px-4 flex gap-1 border-t border-slate-100">
+          <button type="button"
+                  @click="activeTab = 'new'"
+                  :class="activeTab === 'new' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'"
+                  class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Новая заявка</button>
+          <button type="button"
+                  @click="activeTab = 'my'; loadMyRequests()"
+                  :class="activeTab === 'my' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'"
+                  class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Мои заявки</button>
+          <button type="button" x-show="user.is_admin"
+                  @click="activeTab = 'admin'; loadAdmin()"
+                  :class="activeTab === 'admin' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'"
+                  class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition">⚙ Администрирование</button>
+        </div>
+      </header>
+
+      <main class="max-w-4xl mx-auto px-4 py-8">
+
+        <!-- ============ ВКЛАДКА «МОИ ЗАЯВКИ» ============ -->
+        <div x-show="activeTab === 'my'" x-cloak>
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-base font-semibold text-slate-900">Мои заявки</h2>
+            <button class="text-sm text-blue-600 hover:underline" @click="loadMyRequests()">↻ Обновить</button>
+          </div>
+
+          <template x-if="myRequestsLoading">
+            <p class="text-sm text-slate-500">Загрузка…</p>
+          </template>
+
+          <template x-if="!myRequestsLoading && myRequests.length === 0">
+            <div class="card text-center text-slate-500 text-sm">Заявок пока нет — подайте первую во вкладке «Новая заявка».</div>
+          </template>
+
+          <div class="space-y-3">
+            <template x-for="r in myRequests" :key="r.id">
+              <div class="card">
+                <div class="flex items-start justify-between gap-3 cursor-pointer" @click="toggleRequestDetails(r)">
+                  <div>
+                    <div class="font-medium text-slate-900" x-text="r.name"></div>
+                    <div class="text-xs text-slate-500 mt-0.5">
+                      №<span x-text="r.id.slice(0,8)"></span> ·
+                      <span x-text="r.initiator_name"></span> ·
+                      <span x-text="formatDate(r.created_at)"></span>
+                    </div>
+                  </div>
+                  <span class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium"
+                        :class="statusBadgeClass(r.status)"
+                        x-text="statusLabel(r.status)"></span>
+                </div>
+
+                <div class="mt-3 flex flex-wrap gap-2">
+                  <template x-for="a in r.approvals" :key="a.approver_id">
+                    <span class="inline-flex items-center gap-1 text-xs rounded-full border px-2 py-1"
+                          :class="a.decision === 'approve' ? 'border-green-200 bg-green-50 text-green-700' : (a.decision === 'reject' ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-500')">
+                      <span x-text="approverName(a.approver_id)"></span>
+                      <span x-text="a.decision === 'approve' ? '✔' : (a.decision === 'reject' ? '✕' : '…')"></span>
+                    </span>
+                  </template>
+                </div>
+
+                <!-- Детали заявки — подгружаются по клику на карточку -->
+                <template x-if="expandedId === r.id">
+                  <div class="mt-4 pt-4 border-t border-slate-100 text-sm text-slate-600">
+                    <template x-if="!requestDetails[r.id]">
+                      <p class="text-slate-400">Загрузка деталей…</p>
+                    </template>
+                    <template x-if="requestDetails[r.id]">
+                      <div class="space-y-1">
+                        <div><span class="text-slate-400">Цены:</span>
+                          <template x-for="p in requestDetails[r.id].payload.prices" :key="p.branch">
+                            <span class="mr-2" x-text="p.branch + ': ' + p.price.toFixed(2) + ' ₽'"></span>
+                          </template>
+                        </div>
+                        <div x-show="requestDetails[r.id].payload.minzdrav">
+                          <span class="text-slate-400">Код Минздрава:</span>
+                          <span x-text="requestDetails[r.id].payload.minzdrav?.code + ' — ' + requestDetails[r.id].payload.minzdrav?.name"></span>
+                        </div>
+                        <div x-show="requestDetails[r.id].payload.description">
+                          <span class="text-slate-400">Описание:</span>
+                          <span x-text="requestDetails[r.id].payload.description"></span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- ============ ВКЛАДКА «АДМИНИСТРИРОВАНИЕ» ============ -->
+        <div x-show="activeTab === 'admin'" x-cloak class="space-y-6">
+
+          <div class="card">
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-base font-semibold text-slate-900">Согласующие</h2>
+              <span class="text-xs text-slate-400" x-text="adminApprovers.length + ' записей'"></span>
+            </div>
+
+            <div class="space-y-2 mb-4">
+              <template x-for="a in adminApprovers" :key="a.id">
+                <div class="flex items-center gap-3 text-sm border border-slate-100 rounded-lg px-3 py-2">
+                  <div class="flex-1">
+                    <div class="font-medium text-slate-800" x-text="a.name"></div>
+                    <div class="text-xs text-slate-500" x-text="a.role + ' · ' + a.email + ' · id: ' + a.id"></div>
+                  </div>
+                  <button type="button" class="text-red-500 text-xs hover:underline" @click="deleteApprover(a.id)">Удалить</button>
+                </div>
+              </template>
+              <p x-show="!adminApprovers.length" class="text-sm text-slate-400">Список пуст.</p>
+            </div>
+
+            <div class="border-t border-slate-100 pt-4">
+              <p class="text-xs font-medium text-slate-500 mb-2">Добавить согласующего</p>
+              <div class="grid sm:grid-cols-2 gap-2 mb-2">
+                <input class="input" placeholder="id (латиницей, уникальный)" x-model="newApprover.id">
+                <input class="input" placeholder="ФИО" x-model="newApprover.name">
+                <input class="input" placeholder="Email" x-model="newApprover.email">
+                <input class="input" placeholder="Роль (напр. Гл. врач)" x-model="newApprover.role">
+              </div>
+              <button type="button" class="btn-secondary" @click="addApprover()">+ Добавить</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-base font-semibold text-slate-900">Филиалы</h2>
+              <span class="text-xs text-slate-400" x-text="adminBranches.length + ' записей'"></span>
+            </div>
+
+            <div class="space-y-2 mb-4">
+              <template x-for="b in adminBranches" :key="b.id">
+                <div class="flex items-center gap-3 text-sm border border-slate-100 rounded-lg px-3 py-2">
+                  <div class="flex-1">
+                    <div class="font-medium text-slate-800" x-text="b.name"></div>
+                    <div class="text-xs text-slate-500" x-text="'id: ' + b.id"></div>
+                  </div>
+                  <button type="button" class="text-red-500 text-xs hover:underline" @click="deleteBranch(b.id)">Удалить</button>
+                </div>
+              </template>
+              <p x-show="!adminBranches.length" class="text-sm text-slate-400">Список пуст.</p>
+            </div>
+
+            <div class="border-t border-slate-100 pt-4">
+              <p class="text-xs font-medium text-slate-500 mb-2">Добавить филиал</p>
+              <div class="grid sm:grid-cols-2 gap-2 mb-2">
+                <input class="input" placeholder="id (латиницей, уникальный)" x-model="newBranch.id">
+                <input class="input" placeholder="Название филиала" x-model="newBranch.name">
+              </div>
+              <button type="button" class="btn-secondary" @click="addBranch()">+ Добавить</button>
+            </div>
+          </div>
+
+          <p x-show="adminError" x-text="adminError" class="text-red-600 text-sm"></p>
+        </div>
+
+        <!-- ============ ВКЛАДКА «НОВАЯ ЗАЯВКА» ============ -->
+        <div x-show="activeTab === 'new'">
+
+        <!-- Сообщение об успехе -->
+        <template x-if="submitted">
+          <div class="card mb-6 border-green-200 bg-green-50">
+            <div class="flex items-start gap-3">
+              <div class="text-green-600 text-2xl">✔</div>
+              <div>
+                <div class="font-semibold text-green-800">Заявка №<span x-text="submittedId.slice(0,8)"></span> отправлена на согласование</div>
+                <p class="text-sm text-green-700 mt-1">Согласующие получили письма со ссылками «Согласовать/Отклонить». Статус можно отслеживать в разделе «Мои заявки».</p>
+              </div>
+              <button class="ml-auto text-green-700 text-sm underline" @click="resetForm()">Подать ещё одну</button>
+            </div>
+          </div>
+        </template>
+
+        <form @submit.prevent="submitRequest()" x-show="!submitted" class="space-y-6">
+
+          <!-- Тип заявки -->
+          <div class="card">
+            <h2 class="text-base font-semibold text-slate-900 mb-4">1. Тип заявки</h2>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <template x-for="rt in requestTypes" :key="rt.value">
+                <button type="button"
+                        @click="form.request_type = rt.value"
+                        :class="form.request_type === rt.value ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                        class="rounded-lg border px-3 py-2 text-sm font-medium text-left transition">
+                  <span x-text="rt.label"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- Обязательные поля -->
+          <div class="card">
+            <h2 class="text-base font-semibold text-slate-900 mb-4">2. Основные параметры услуги</h2>
+
+            <div class="mb-4">
+              <label class="field-label">Наименование услуги (как будет отображаться в МИС) *</label>
+              <input class="input" x-model="form.name" @input="debouncedMinzdravSearch()" required maxlength="255"
+                     placeholder="Например: Приём врача-терапевта повторный">
+            </div>
+
+            <div class="grid sm:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label class="field-label">Тип услуги *</label>
+                <select class="input" x-model="form.service_type" required>
+                  <template x-for="t in serviceTypes" :key="t.value">
+                    <option :value="t.value" x-text="t.label"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="field-label">Прейскурант</label>
+                <select class="input" x-model="form.price_list">
+                  <option value="both">ОМС и ДМС</option>
+                  <option value="dms">ДМС</option>
+                  <option value="oms">ОМС</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Признак лаборатории -->
+            <div class="mb-4 flex items-center gap-2">
+              <input type="checkbox" id="is_lab" x-model="form.is_lab_service" class="rounded border-slate-300 text-blue-600">
+              <label for="is_lab" class="text-sm text-slate-700">Это лабораторное исследование / анализ (ЕРЛУ-КДЛ)</label>
+            </div>
+
+            <!-- Автокомплит Минздрав -->
+            <div class="mb-2 relative">
+              <label class="field-label">Код Минздрава (Номенклатура медицинских услуг, НСИ 1.2.643.5.1.13.13.11.1070)</label>
+              <input class="input" x-model="minzdravQuery" @input="searchMinzdrav()" placeholder="Начните вводить название или код (A03.26.009)">
+              <div x-show="minzdravResults.length" class="absolute z-20 bg-white border border-slate-200 rounded-lg mt-1 w-full max-h-56 overflow-auto shadow-lg">
+                <template x-for="r in minzdravResults" :key="r.code">
+                  <button type="button" class="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 flex justify-between gap-2"
+                          @click="selectMinzdrav(r)">
+                    <span x-text="r.name"></span>
+                    <span class="text-slate-400 font-mono text-xs" x-text="r.code"></span>
+                  </button>
+                </template>
+              </div>
+              <template x-if="form.minzdrav">
+                <div class="mt-2"><span class="chip">✓ <span x-text="form.minzdrav.code"></span> — <span x-text="form.minzdrav.name"></span>
+                  <button type="button" class="ml-1 text-blue-500" @click="form.minzdrav = null">✕</button></span></div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Блок ЕРЛУ-КДЛ (динамический) -->
+          <div class="card border-amber-200 bg-amber-50/40" x-show="form.is_lab_service" x-transition>
+            <h2 class="text-base font-semibold text-slate-900 mb-1">3. Интеграция с ЕРЛУ-КДЛ *</h2>
+            <p class="text-xs text-slate-500 mb-4">Обязательно для лабораторных исследований — заполняется по справочнику ЕРЛУ-КДЛ.</p>
+
+            <div class="mb-4 relative">
+              <label class="field-label">Точное наименование анализа (как в ЛИС / ЕРЛУ) *</label>
+              <input class="input" x-model="erluQuery" @input="searchErlu()" :required="form.is_lab_service"
+                     placeholder="Например: Клинический анализ крови">
+              <div x-show="erluResults.length" class="absolute z-20 bg-white border border-slate-200 rounded-lg mt-1 w-full max-h-64 overflow-auto shadow-lg">
+                <template x-for="r in erluResults" :key="r.erlu_code">
+                  <button type="button" class="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-slate-50"
+                          @click="selectErlu(r)">
+                    <div class="flex justify-between gap-2">
+                      <span x-text="r.erlu_name"></span>
+                      <span class="text-slate-400 font-mono text-xs" x-text="r.erlu_code"></span>
+                    </div>
+                    <div class="text-xs text-slate-500" x-text="r.lab_name + ' · код ЛАБ: ' + r.lab_code"></div>
+                  </button>
+                </template>
+              </div>
+            </div>
+
+            <div class="grid sm:grid-cols-2 gap-4">
+              <div>
+                <label class="field-label">Код лаборатории</label>
+                <input class="input bg-slate-100" x-model="form.lab.lab_code" readonly>
+              </div>
+              <div>
+                <label class="field-label">Код ЕРЛУ</label>
+                <input class="input bg-slate-100" x-model="form.lab.erlu_code" readonly>
+              </div>
+              <div>
+                <label class="field-label">Наименование направления исследования *</label>
+                <input class="input" x-model="form.lab.direction_name" :required="form.is_lab_service">
+              </div>
+              <div>
+                <label class="field-label">Тип биоматериала *</label>
+                <select class="input" x-model="form.lab.biomaterial_type" :required="form.is_lab_service">
+                  <option value="">— выбрать —</option>
+                  <option>Венозная кровь</option>
+                  <option>Капиллярная кровь</option>
+                  <option>Моча</option>
+                  <option>Кал</option>
+                  <option>Мазок</option>
+                  <option>Слюна</option>
+                  <option>Другое</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Цены по филиалам -->
+          <div class="card">
+            <h2 class="text-base font-semibold text-slate-900 mb-4">4. Цены по филиалам *</h2>
+            <div class="mb-3 flex items-center gap-2">
+              <input type="checkbox" id="all_branches" x-model="form.all_branches" @change="toggleAllBranches()" class="rounded border-slate-300 text-blue-600">
+              <label for="all_branches" class="text-sm text-slate-700">Одинаковая цена во всех филиалах</label>
+            </div>
+
+            <template x-if="form.all_branches">
+              <div class="max-w-xs">
+                <label class="field-label">Цена, ₽</label>
+                <input class="input" type="number" min="0" step="0.01" x-model.number="uniformPrice" @input="applyUniformPrice()" required>
+              </div>
+            </template>
+
+            <template x-if="!form.all_branches">
+              <div class="space-y-2">
+                <template x-for="(branch, idx) in branches" :key="branch">
+                  <div class="flex items-center gap-3">
+                    <label class="w-40 text-sm text-slate-700" x-text="branch"></label>
+                    <input class="input" type="number" min="0" step="0.01"
+                           :value="priceFor(branch)"
+                           @input="setPriceFor(branch, $event.target.value)"
+                           placeholder="не оказывается в филиале — оставить пустым">
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <!-- Опциональные поля -->
+          <div class="card">
+            <button type="button" class="flex items-center justify-between w-full" @click="showOptional = !showOptional">
+              <h2 class="text-base font-semibold text-slate-900">5. Дополнительные параметры (необязательно)</h2>
+              <span class="text-slate-400" x-text="showOptional ? '▲' : '▼'"></span>
+            </button>
+
+            <div x-show="showOptional" x-transition class="mt-4 space-y-4">
+              <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="field-label">Сокращённое наименование</label>
+                  <input class="input" x-model="form.short_name" maxlength="100">
+                </div>
+                <div>
+                  <label class="field-label">Альтернативное название</label>
+                  <input class="input" x-model="form.alt_name">
+                </div>
+              </div>
+
+              <div>
+                <label class="field-label">Описание</label>
+                <textarea class="input" rows="2" x-model="form.description"></textarea>
+              </div>
+
+              <div>
+                <label class="field-label">Стандарт лечения</label>
+                <input class="input" x-model="form.treatment_standard">
+              </div>
+
+              <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="field-label">Дата начала действия</label>
+                  <input class="input" type="date" x-model="form.date_start">
+                </div>
+                <div>
+                  <label class="field-label">Дата окончания действия</label>
+                  <input class="input" type="date" x-model="form.date_end">
+                </div>
+              </div>
+
+              <div class="grid sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="field-label">Ограничение по полу</label>
+                  <select class="input" x-model="form.sex_limit">
+                    <option value="all">Для всех</option>
+                    <option value="male">Мужской</option>
+                    <option value="female">Женский</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Возраст от (лет)</label>
+                  <input class="input" type="number" min="0" x-model.number="form.age_from">
+                </div>
+                <div>
+                  <label class="field-label">Возраст до (лет)</label>
+                  <input class="input" type="number" min="0" x-model.number="form.age_to">
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="repeat_control" x-model="form.repeat_control_per_day" class="rounded border-slate-300 text-blue-600">
+                <label for="repeat_control" class="text-sm text-slate-700">Контроль повторного оказания услуги в течение дня</label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Деловое обоснование -->
+          <div class="card">
+            <button type="button" class="flex items-center justify-between w-full" @click="showBusiness = !showBusiness">
+              <h2 class="text-base font-semibold text-slate-900">6. Деловое обоснование</h2>
+              <span class="text-slate-400" x-text="showBusiness ? '▲' : '▼'"></span>
+            </button>
+            <div x-show="showBusiness" x-transition class="mt-4 space-y-4">
+              <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="field-label">Вид услуги</label>
+                  <select class="input" x-model="form.business.service_kind">
+                    <option value="">— не указано —</option>
+                    <option>Консультация</option>
+                    <option>Манипуляция</option>
+                    <option>Операция</option>
+                    <option>Исследование</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="field-label">Продолжительность, мин</label>
+                  <input class="input" type="number" min="0" x-model.number="form.business.duration_minutes">
+                </div>
+              </div>
+              <div>
+                <label class="field-label">Персонал (должности)</label>
+                <input class="input" x-model="form.business.staff_involved">
+              </div>
+              <div class="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="field-label">Оборудование</label>
+                  <input class="input" x-model="form.business.equipment">
+                </div>
+                <div>
+                  <label class="field-label">Расходные материалы</label>
+                  <input class="input" x-model="form.business.consumables">
+                </div>
+              </div>
+              <div>
+                <label class="field-label">Суть услуги, позиционирование, продвижение</label>
+                <textarea class="input" rows="2" x-model="form.business.description"></textarea>
+              </div>
+            </div>
+          </div>
+
+          <!-- Маршрутизация -->
+          <div class="card">
+            <h2 class="text-base font-semibold text-slate-900 mb-1">7. Согласующие *</h2>
+            <p class="text-xs text-slate-500 mb-4">Выберите, кому направить заявку на согласование.</p>
+            <div class="grid sm:grid-cols-2 gap-2">
+              <template x-for="a in approvers" :key="a.id">
+                <label class="flex items-center gap-2 border border-slate-200 rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-slate-50"
+                       :class="form.approver_ids.includes(a.id) ? 'border-blue-400 bg-blue-50' : ''">
+                  <input type="checkbox" class="rounded border-slate-300 text-blue-600" :value="a.id" x-model="form.approver_ids">
+                  <span><span class="font-medium" x-text="a.name"></span> <span class="text-slate-400">— <span x-text="a.role"></span></span></span>
+                </label>
+              </template>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between">
+            <p class="text-xs text-slate-500">Инициатор: <span x-text="user.display_name"></span> (<span x-text="user.email"></span>) — подставляется автоматически из AD.</p>
+            <button class="btn-primary" type="submit" :disabled="loading">
+              <span x-show="!loading">Отправить на согласование</span>
+              <span x-show="loading">Отправка…</span>
+            </button>
+          </div>
+          <p x-show="submitError" x-text="submitError" class="text-red-600 text-sm"></p>
+        </form>
+        </div>
+        <!-- /вкладка «Новая заявка» -->
+
+      </main>
+    </div>
+  </template>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

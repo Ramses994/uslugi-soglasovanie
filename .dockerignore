@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+node_modules
+tests
+requirements-dev.txt
+data/*.db
+data/*.db-journal
+screenshots
+*.zip
+cursor_prompt.md
+cursor_deploy_prompt.md

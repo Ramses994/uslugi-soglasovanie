@@ -1,0 +1,37 @@
+[
+  {
+    "id": "chief_doctor",
+    "name": "Главный врач",
+    "email": "chief.doctor@clinic.local",
+    "role": "Главный врач",
+    "required_for": ["all"]
+  },
+  {
+    "id": "commercial_director",
+    "name": "Коммерческий директор",
+    "email": "commercial.director@clinic.local",
+    "role": "Коммерческий директор",
+    "required_for": ["all"]
+  },
+  {
+    "id": "chief_accountant",
+    "name": "Главный бухгалтер",
+    "email": "chief.accountant@clinic.local",
+    "role": "Главный бухгалтер",
+    "required_for": ["price_change"]
+  },
+  {
+    "id": "lab_head",
+    "name": "Заведующий КДЛ",
+    "email": "lab.head@clinic.local",
+    "role": "Заведующий лабораторией",
+    "required_for": ["lab"]
+  },
+  {
+    "id": "mis_admin",
+    "name": "Администратор МИС Медиалог",
+    "email": "mis.admin@clinic.local",
+    "role": "Администратор МИС",
+    "required_for": ["all"]
+  }
+]
