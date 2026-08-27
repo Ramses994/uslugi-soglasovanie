@@ -319,3 +319,13 @@ class TestValidationErrorFormat:
         detail = r.json()["detail"]
         assert isinstance(detail, list)
         assert all("msg" in item and "loc" in item for item in detail)
+
+    def test_blank_date_strings_are_accepted_as_optional(self, logged_in_client):
+        # Регресс-тест на баг, найденный на боевом сервере 192.168.2.104: обычный
+        # <input type="date"> без выбранной даты отдаёт "" (не null), а pydantic
+        # v2 не приводит "" к None для типа date сам по себе — заявка без дат
+        # (которые НЕ обязательны) отклонялась с "input is too short". См. schemas.py
+        # (_blank_date_to_none) и ТЗ.md.
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "date_start": "", "date_end": ""}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text

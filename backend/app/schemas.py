@@ -104,6 +104,21 @@ class ServiceRequestIn(BaseModel):
     treatment_standard: Optional[str] = None
     date_start: Optional[date] = None
     date_end: Optional[date] = None
+
+    # Фронтенд — обычный <input type="date"> на Alpine x-model без модификатора:
+    # когда поле не заполнено, в форму приходит "" (пустая строка), а не null/
+    # отсутствие ключа. Pydantic v2 НЕ приводит "" к None для типа date (в отличие
+    # от x-model.number, который сам подставляет null) — "" валится как "input is
+    # too short", хотя даты явно необязательны (см. ТЗ.md, раздел 12.9/12.10:
+    # баг воспроизведён на боевом сервере 192.168.2.104 при попытке отправить
+    # заявку без дат). Приводим "" -> None здесь же, на бэкенде, а не только на
+    # фронтенде — так поле остаётся необязательным и при прямых вызовах API.
+    @field_validator("date_start", "date_end", mode="before")
+    @classmethod
+    def _blank_date_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
     sex_limit: Sex = Sex.all
     age_from: Optional[float] = Field(None, ge=0)
     age_to: Optional[float] = Field(None, ge=0)

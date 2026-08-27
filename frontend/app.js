@@ -426,6 +426,12 @@ function app() {
       try {
         const payload = JSON.parse(JSON.stringify(this.form));
         if (!payload.is_lab_service) payload.lab = null;
+        // Дата начала/окончания — необязательные поля, но обычный <input type="date">
+        // на x-model без модификатора отдаёт "" (не null), когда дата не выбрана.
+        // Бэкенд теперь тоже приводит "" -> None (см. schemas.py), но нормализуем
+        // и здесь, чтобы поведение не зависело от конкретной версии API.
+        if (!payload.date_start) payload.date_start = null;
+        if (!payload.date_end) payload.date_end = null;
         const res = await api("/api/requests", { method: "POST", body: JSON.stringify(payload) });
         this.submitted = true;
         this.submittedId = res.id;
