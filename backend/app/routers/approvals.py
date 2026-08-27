@@ -9,13 +9,18 @@
 
 Reject и rework оба переводят заявку в status=rework, чтобы инициатор мог править
 и отправить повторно. В журнале истории решение всё равно различается (reject vs rework).
+
+«Согласовать» срабатывает одним GET. «Отклонить» / «На доработку» по GET сначала
+показывают HTML-форму комментария (почтовики вырезают JS из писем, поэтому
+prompt/modal на фронтенде из письма открыть нельзя), а решение фиксируется POST-ом.
 """
 import copy
 import json
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -32,6 +37,7 @@ router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 settings = get_settings()
 
 _ACTIONS = ("approve", "reject", "rework")
+_COMMENT_ACTIONS = ("reject", "rework")
 _ACTION_TITLES = {
     "approve": ("Спасибо, решение зафиксировано", "согласовано"),
     "reject": ("Заявка отклонена и отправлена на доработку", "отклонено"),
@@ -49,15 +55,45 @@ def _confirmation_page(title: str, message: str, ok: bool = True) -> HTMLRespons
     color = "#1b8a4c" if ok else "#c0392b"
     return HTMLResponse(f"""
     <!doctype html><html lang="ru"><head><meta charset="utf-8">
-    <title>{title}</title></head>
+    <title>{escape(title)}</title></head>
     <body style="font-family:Segoe UI,Arial,sans-serif;background:#f2f4f7;display:flex;
                  align-items:center;justify-content:center;height:100vh;margin:0;">
       <div style="background:#fff;padding:32px 40px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.08);max-width:480px;text-align:center;">
-        <h2 style="color:{color};margin-top:0;">{title}</h2>
+        <h2 style="color:{color};margin-top:0;">{escape(title)}</h2>
         <p style="color:#333;font-size:14px;">{message}</p>
       </div>
     </body></html>
     """)
+
+
+def _comment_form_page(token: str, action: str, service_name: str) -> HTMLResponse:
+    if action == "reject":
+        title, prompt, placeholder, submit_label, accent = (
+            "Отклонить заявку",
+            "Причина отклонения",
+            "Например: цена не соответствует бюджету",
+            "Отклонить",
+            "#c0392b",
+        )
+    else:
+        title, prompt, placeholder, submit_label, accent = (
+            "Отправить на доработку",
+            "Что нужно доработать",
+            "Например: уточните показания и цены по филиалам",
+            "На доработку",
+            "#b45309",
+        )
+    html = render_template(
+        "approval_comment_form.html",
+        title=title,
+        prompt=prompt,
+        placeholder=placeholder,
+        submit_label=submit_label,
+        accent=accent,
+        service_name=service_name,
+        form_url=f"/api/approvals/{token}/{action}",
+    )
+    return HTMLResponse(html)
 
 
 def _notify_after_decision(
@@ -92,36 +128,24 @@ def _notify_after_decision(
         try_send_email(to=[initiator_email], subject=f"[Обновление] {service_name}", html_body=html)
 
 
-@router.get("/{token}/{action}")
-def decide(
-    token: str,
-    action: str,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    comment: str | None = Query(None),
-):
-    # ВАЖНО: db приходит через Depends(get_db), как и во всех остальных роутерах — НЕ через
-    # прямое SessionLocal(). Раньше это было единственное место в проекте, обращавшееся к
-    # SessionLocal() напрямую, из-за чего FastAPI dependency_overrides (ключевой механизм
-    # подмены БД на тестовую в tests/conftest.py) на этот эндпоинт не действовал: тесты
-    # создавали заявку через один движок БД, а approvals.decide() искал её в другом
-    # (реальном, dev-файле data/requests.db) и получали "заявка не найдена". Приведено
-    # к общему паттерну — заодно эндпоинт стал по-настоящему тестируемым в изоляции.
+def _prepare_decision(token: str, action: str, db: Session):
+    """Общая проверка токена/заявки до показа формы или фиксации решения.
+    Возвращает (контекст, None) либо (None, HTML-ответ с ошибкой/уже решено)."""
     if action not in _ACTIONS:
         raise HTTPException(400, "Некорректное действие")
 
     data = read_approval_token(token)
     if not data:
-        return _confirmation_page("Ссылка недействительна", "Ссылка устарела (срок 14 дней) или повреждена.", ok=False)
+        return None, _confirmation_page("Ссылка недействительна", "Ссылка устарела (срок 14 дней) или повреждена.", ok=False)
 
     entity = db.get(ServiceRequest, data["request_id"])
     if not entity:
-        return _confirmation_page("Заявка не найдена", "Возможно, она была удалена.", ok=False)
+        return None, _confirmation_page("Заявка не найдена", "Возможно, она была удалена.", ok=False)
 
     approvers_map = _load_approvers()
     approver = approvers_map.get(data["approver_id"])
     if not approver:
-        return _confirmation_page("Согласующий не найден", "Обратитесь к администратору формы.", ok=False)
+        return None, _confirmation_page("Согласующий не найден", "Обратитесь к администратору формы.", ok=False)
 
     # ВАЖНО: копируем, а не берём entity.approvals напрямую. Column(JSON) в SQLAlchemy
     # отслеживает изменения по идентичности объекта, снятой при загрузке строки; если
@@ -130,19 +154,32 @@ def decide(
     approvals = copy.deepcopy(entity.approvals) or []
     already = next((a for a in approvals if a["approver_id"] == data["approver_id"] and a["decision"]), None)
     if already:
-        return _confirmation_page(
+        return None, _confirmation_page(
             "Решение уже зафиксировано",
-            f"Вы уже отметили эту заявку как «{already['decision']}» {already['decided_at']}.",
+            f"Вы уже отметили эту заявку как «{escape(str(already['decision']))}» {escape(str(already['decided_at'] or ''))}.",
         )
 
     if entity.status != RequestStatus.pending:
-        return _confirmation_page(
+        return None, _confirmation_page(
             "Заявка уже не на согласовании",
-            f"Текущий статус: «{entity.status.value}». Новое решение по этой ссылке не принимается.",
+            f"Текущий статус: «{escape(entity.status.value)}». Новое решение по этой ссылке не принимается.",
             ok=False,
         )
 
-    note = (comment or "").strip() or None
+    return {
+        "data": data,
+        "entity": entity,
+        "approver": approver,
+        "approvers_map": approvers_map,
+        "approvals": approvals,
+    }, None
+
+
+def _apply_decision(ctx: dict, action: str, note: str | None, background_tasks: BackgroundTasks, db: Session) -> HTMLResponse:
+    entity = ctx["entity"]
+    data = ctx["data"]
+    approver = ctx["approver"]
+    approvals = ctx["approvals"]
     status_before = entity.status.value
 
     for a in approvals:
@@ -174,13 +211,9 @@ def decide(
     db.add(entity)
     db.commit()
 
-    # уведомляем инициатора (и, если согласовано, администратора МИС) в фоне —
-    # см. _notify_after_decision. Все данные, нужные для письма, снимаются здесь,
-    # пока сущность ещё привязана к сессии, и передаются в фоновую задачу как простые
-    # значения (не сам ORM-объект — сессия из Depends(get_db) закроется сразу после ответа).
     req_in = ServiceRequestIn.model_validate(entity.payload)
     import_xlsx = build_import_workbook(req_in) if entity.status == RequestStatus.approved else None
-    mis_admin_email = approvers_map.get("mis_admin", {}).get("email")
+    mis_admin_email = ctx["approvers_map"].get("mis_admin", {}).get("email")
 
     background_tasks.add_task(
         _notify_after_decision,
@@ -189,7 +222,42 @@ def decide(
     )
 
     title, verb = _ACTION_TITLES[action]
+    extra = "<br>Комментарий сохранён." if note else ""
     return _confirmation_page(
         title,
-        f"Услуга «{req_in.name}» отмечена вами как «{verb}».",
+        f"Услуга «{escape(req_in.name)}» отмечена вами как «{verb}».{extra}",
     )
+
+
+@router.get("/{token}/{action}")
+def decide_get(
+    token: str,
+    action: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    comment: str | None = Query(None),
+):
+    ctx, err = _prepare_decision(token, action, db)
+    if err:
+        return err
+    if action in _COMMENT_ACTIONS:
+        req_in = ServiceRequestIn.model_validate(ctx["entity"].payload)
+        return _comment_form_page(token, action, req_in.name)
+    note = (comment or "").strip() or None
+    return _apply_decision(ctx, action, note, background_tasks, db)
+
+
+@router.post("/{token}/{action}")
+def decide_post(
+    token: str,
+    action: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    comment: str | None = Form(None),
+    reason: str | None = Form(None),
+):
+    ctx, err = _prepare_decision(token, action, db)
+    if err:
+        return err
+    note = (comment or reason or "").strip() or None
+    return _apply_decision(ctx, action, note, background_tasks, db)

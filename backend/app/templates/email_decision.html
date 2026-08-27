@@ -17,8 +17,17 @@
           <p style="margin:0 0 12px 0;color:#1a1a1a;font-size:14px;">
             <b>{{ approver_name }}</b> ({{ approver_role }}):
             <b>{% if decision == "approve" %}Согласовано{% elif decision == "rework" %}На доработку{% else %}Отклонено{% endif %}</b>
-            {% if comment %}<br>Комментарий: {{ comment }}{% endif %}
           </p>
+          {% if comment %}
+          <p style="margin:0 0 8px 0;color:#1a1a1a;font-size:14px;">
+            {% if decision == "reject" %}<b>Причина отклонения:</b>{% else %}<b>Комментарий согласующего:</b>{% endif %}
+          </p>
+          <p style="margin:0 0 12px 0;padding:12px 14px;border-left:4px solid {{ '#c0392b' if decision == 'reject' else '#b45309' }};background:{{ '#fdecea' if decision == 'reject' else '#fff7ed' }};color:#333;font-size:14px;">
+            {{ comment }}
+          </p>
+          {% elif decision != "approve" %}
+          <p style="margin:0 0 12px 0;color:#8a8f98;font-size:13px;">Комментарий не указан.</p>
+          {% endif %}
           {% if status == 'approved' %}
           <p style="margin:0;color:#1a1a1a;font-size:14px;">
             Все согласующие подтвердили заявку. Файл для импорта в МИС «Медиалог» приложен к этому письму
