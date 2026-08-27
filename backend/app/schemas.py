@@ -7,7 +7,7 @@ Pydantic-схемы. Структура ServiceRequestIn сознательно 
 Поля сгруппированы так же, как в чек-листе раздела 3 ТЗ.
 """
 import re
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -141,6 +141,17 @@ class ServiceRequestIn(BaseModel):
     # --- сопоставление с номенклатурой Минздрава ---
     minzdrav: Optional[MinzdravMatch] = None
 
+    # Комментарий инициатора к этой отправке на согласование (колонка заявки,
+    # не поле карточки услуги МИС). В payload JSON не кладём — иначе дублируется.
+    submission_comment: Optional[str] = Field(None, description="Комментарий инициатора для согласующих")
+
+    @field_validator("submission_comment", mode="before")
+    @classmethod
+    def _blank_submission_comment_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     # --- маршрутизация согласования ---
     approver_ids: list[str] = Field(..., min_length=1)
 
@@ -160,8 +171,32 @@ class ServiceRequestIn(BaseModel):
 
 
 class ApprovalDecision(BaseModel):
-    decision: str = Field(..., pattern="^(approve|reject)$")
+    decision: str = Field(..., pattern="^(approve|reject|rework)$")
     comment: Optional[str] = None
+
+
+class ResubmitIn(BaseModel):
+    submission_comment: Optional[str] = None
+
+    @field_validator("submission_comment", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+
+class ApprovalHistoryOut(BaseModel):
+    id: int
+    approver_id: Optional[str] = None
+    approver_login: str
+    approver_name: str
+    approver_email: str
+    decision: str
+    comment: Optional[str] = None
+    created_at: datetime
+    status_before: Optional[str] = None
+    status_after: Optional[str] = None
 
 
 class UserProfile(BaseModel):

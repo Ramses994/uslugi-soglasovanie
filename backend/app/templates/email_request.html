@@ -12,7 +12,7 @@
 
         <tr><td style="padding:24px 28px 8px 28px;">
           <p style="margin:0 0 16px 0;color:#1a1a1a;font-size:14px;">
-            Поступила новая заявка №<b>{{ request_id[:8] }}</b> от
+            Поступила заявка №<b>{{ request_id[:8] }}</b>{% if version %} (версия {{ version }}){% endif %} от
             <b>{{ initiator_name }}</b> ({{ initiator_position or "—" }}, {{ initiator_department or "—" }}).
             Требуется ваше решение.
           </p>
@@ -48,6 +48,10 @@
                 {% if data.business.description %}{{ data.business.description }}{% endif %}
               </td></tr>
             {% endif %}
+            {% if submission_comment %}
+            <tr style="background:#f7f9fc;"><td style="border:1px solid #e4e8ee;"><b>Комментарий инициатора</b></td>
+              <td style="border:1px solid #e4e8ee;">{{ submission_comment }}</td></tr>
+            {% endif %}
           </table>
         </td></tr>
 
@@ -57,8 +61,11 @@
               <td style="padding-right:12px;">
                 <a href="{{ approve_url }}" style="display:inline-block;background:#1b8a4c;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:600;">✔ Согласовать</a>
               </td>
-              <td>
+              <td style="padding-right:12px;">
                 <a href="{{ reject_url }}" style="display:inline-block;background:#c0392b;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:600;">✕ Отклонить</a>
+              </td>
+              <td>
+                <a href="{{ rework_url }}" style="display:inline-block;background:#b45309;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:600;">↶ На доработку</a>
               </td>
             </tr>
           </table>

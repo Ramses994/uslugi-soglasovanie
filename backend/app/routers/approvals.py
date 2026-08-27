@@ -1,18 +1,21 @@
 """
-Обработка кликов по ссылкам "Согласовать / Отклонить" прямо из письма (без логина —
-токен уже содержит и request_id, и approver_id, подписан приложением и живёт 14 дней,
-см. security.make_approval_token / read_approval_token).
+Обработка кликов по ссылкам "Согласовать / Отклонить / На доработку" прямо из письма
+(без логина — токен уже содержит и request_id, и approver_id, подписан приложением
+и живёт 14 дней, см. security.make_approval_token / read_approval_token).
 
 Как только все согласующие подтвердили заявку — статус переводится в approved
 и генерируется файл импорта в МИС (medialog_export.build_import_workbook), который
 уходит письмом администратору МИС.
+
+Reject и rework оба переводят заявку в status=rework, чтобы инициатор мог править
+и отправить повторно. В журнале истории решение всё равно различается (reject vs rework).
 """
 import copy
 import json
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -20,12 +23,20 @@ from ..database import get_db
 from ..models import ServiceRequest, RequestStatus
 from ..schemas import ServiceRequestIn
 from ..security import read_approval_token
+from ..services.approval_history import record as record_history
 from ..services.email_service import render_template, try_send_email, try_send_email_with_attachment
 from ..services.medialog_export import build_import_workbook
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 settings = get_settings()
+
+_ACTIONS = ("approve", "reject", "rework")
+_ACTION_TITLES = {
+    "approve": ("Спасибо, решение зафиксировано", "согласовано"),
+    "reject": ("Заявка отклонена и отправлена на доработку", "отклонено"),
+    "rework": ("Заявка отправлена на доработку", "на доработку"),
+}
 
 
 def _load_approvers() -> dict[str, dict]:
@@ -53,6 +64,7 @@ def _notify_after_decision(
     status_value: str, request_id: str, service_name: str, initiator_email: str,
     approver_name: str, approver_role: str, decision: str,
     mis_admin_email: str | None, import_xlsx: bytes | None,
+    comment: str | None = None,
 ) -> None:
     """Выполняется в фоне, ПОСЛЕ того как согласующий уже увидел страницу
     подтверждения — сбой/задержка SMTP здесь не заставляет согласующего смотреть
@@ -65,7 +77,7 @@ def _notify_after_decision(
         approver_name=approver_name,
         approver_role=approver_role,
         decision=decision,
-        comment=None,
+        comment=comment,
     )
     if status_value == RequestStatus.approved.value and import_xlsx is not None:
         recipients = [initiator_email] + ([mis_admin_email] if mis_admin_email else [])
@@ -81,15 +93,21 @@ def _notify_after_decision(
 
 
 @router.get("/{token}/{action}")
-def decide(token: str, action: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def decide(
+    token: str,
+    action: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    comment: str | None = Query(None),
+):
     # ВАЖНО: db приходит через Depends(get_db), как и во всех остальных роутерах — НЕ через
     # прямое SessionLocal(). Раньше это было единственное место в проекте, обращавшееся к
     # SessionLocal() напрямую, из-за чего FastAPI dependency_overrides (ключевой механизм
     # подмены БД на тестовую в tests/conftest.py) на этот эндпоинт не действовал: тесты
     # создавали заявку через один движок БД, а approvals.decide() искал её в другом
-    # (реальном, dev-файле data/requests.db) и получал "заявка не найдена". Приведено
+    # (реальном, dev-файле data/requests.db) и получали "заявка не найдена". Приведено
     # к общему паттерну — заодно эндпоинт стал по-настоящему тестируемым в изоляции.
-    if action not in ("approve", "reject"):
+    if action not in _ACTIONS:
         raise HTTPException(400, "Некорректное действие")
 
     data = read_approval_token(token)
@@ -117,19 +135,42 @@ def decide(token: str, action: str, background_tasks: BackgroundTasks, db: Sessi
             f"Вы уже отметили эту заявку как «{already['decision']}» {already['decided_at']}.",
         )
 
+    if entity.status != RequestStatus.pending:
+        return _confirmation_page(
+            "Заявка уже не на согласовании",
+            f"Текущий статус: «{entity.status.value}». Новое решение по этой ссылке не принимается.",
+            ok=False,
+        )
+
+    note = (comment or "").strip() or None
+    status_before = entity.status.value
+
     for a in approvals:
         if a["approver_id"] == data["approver_id"]:
             a["decision"] = action
+            a["comment"] = note
             a["decided_at"] = datetime.utcnow().isoformat()
     entity.approvals = approvals
 
-    if action == "reject":
-        entity.status = RequestStatus.rejected
+    if action in ("reject", "rework"):
+        entity.status = RequestStatus.rework
     elif all(a["decision"] == "approve" for a in approvals):
         entity.status = RequestStatus.approved
     else:
         entity.status = RequestStatus.pending
 
+    record_history(
+        db,
+        request_id=entity.id,
+        approver_id=data["approver_id"],
+        approver_login=approver.get("login") or data["approver_id"],
+        approver_name=approver["name"],
+        approver_email=approver["email"],
+        decision=action,
+        comment=note,
+        status_before=status_before,
+        status_after=entity.status.value,
+    )
     db.add(entity)
     db.commit()
 
@@ -144,10 +185,11 @@ def decide(token: str, action: str, background_tasks: BackgroundTasks, db: Sessi
     background_tasks.add_task(
         _notify_after_decision,
         entity.status.value, entity.id, req_in.name, entity.initiator_email,
-        approver["name"], approver["role"], action, mis_admin_email, import_xlsx,
+        approver["name"], approver["role"], action, mis_admin_email, import_xlsx, note,
     )
 
+    title, verb = _ACTION_TITLES[action]
     return _confirmation_page(
-        "Спасибо, решение зафиксировано" if action == "approve" else "Заявка отклонена",
-        f"Услуга «{req_in.name}» отмечена вами как «{'согласовано' if action == 'approve' else 'отклонено'}».",
+        title,
+        f"Услуга «{req_in.name}» отмечена вами как «{verb}».",
     )

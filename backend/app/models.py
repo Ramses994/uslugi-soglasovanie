@@ -11,7 +11,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime, Enum, JSON, Text
+from sqlalchemy import Column, String, DateTime, Enum, JSON, Text, Integer
 from .database import Base
 
 
@@ -44,3 +44,24 @@ class ServiceRequest(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     comment_log = Column(Text, nullable=True)
+    # Комментарий инициатора к текущей отправке на согласование (виден в письме).
+    submission_comment = Column(Text, nullable=True)
+    # Увеличивается при каждой повторной отправке после доработки.
+    version = Column(Integer, nullable=False, default=1)
+
+
+class ApprovalHistory(Base):
+    """Неизменяемый журнал решений: кто, когда, approve/reject/rework/resubmit."""
+    __tablename__ = "approval_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_id = Column(String(36), nullable=False, index=True)
+    approver_id = Column(String(128), nullable=True)
+    approver_login = Column(String(128), nullable=False)
+    approver_name = Column(String(256), nullable=False)
+    approver_email = Column(String(256), nullable=False)
+    decision = Column(String(32), nullable=False)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status_before = Column(String(32), nullable=True)
+    status_after = Column(String(32), nullable=True)

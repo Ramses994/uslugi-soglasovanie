@@ -173,6 +173,7 @@
                     <div class="font-medium text-slate-900" x-text="r.name"></div>
                     <div class="text-xs text-slate-500 mt-0.5">
                       №<span x-text="r.id.slice(0,8)"></span> ·
+                      v<span x-text="r.version || 1"></span> ·
                       <span x-text="requestTypeLabel(r.request_type)"></span> ·
                       <span x-text="r.initiator_name"></span> ·
                       <span x-text="formatDate(r.created_at)"></span>
@@ -186,9 +187,9 @@
                 <div class="mt-3 flex flex-wrap gap-2">
                   <template x-for="a in r.approvals" :key="a.approver_id">
                     <span class="inline-flex items-center gap-1 text-xs rounded-full border px-2 py-1"
-                          :class="a.decision === 'approve' ? 'border-green-200 bg-green-50 text-green-700' : (a.decision === 'reject' ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-500')">
+                          :class="approvalChipClass(a.decision)">
                       <span x-text="approverName(a.approver_id)"></span>
-                      <span x-text="a.decision === 'approve' ? '✔' : (a.decision === 'reject' ? '✕' : '…')"></span>
+                      <span x-text="approvalChipMark(a.decision)"></span>
                     </span>
                   </template>
                 </div>
@@ -200,6 +201,14 @@
                   <button type="button" class="text-sm text-red-500 hover:underline"
                           x-show="user.is_admin"
                           @click="deleteRequest(r.id)">Удалить</button>
+                </div>
+
+                <div class="mt-3" x-show="canResubmitRequest(r)" @click.stop>
+                  <label class="field-label">Комментарий к повторной отправке</label>
+                  <textarea class="input" rows="2" x-model="resubmitComments[r.id]"
+                            placeholder="Что изменилось — согласующие увидят это в письме"></textarea>
+                  <button type="button" class="btn-secondary mt-2"
+                          @click="resubmitRequest(r)">Отправить повторно</button>
                 </div>
 
                 <!-- Детали заявки — подгружаются по клику на карточку -->
@@ -230,6 +239,36 @@
                         <div x-show="requestDetails[r.id].payload.business?.description">
                           <span class="text-slate-400">Обоснование:</span>
                           <span x-text="requestDetails[r.id].payload.business?.description"></span>
+                        </div>
+                        <div x-show="requestDetails[r.id].submission_comment">
+                          <span class="text-slate-400">Комментарий к отправке:</span>
+                          <span x-text="requestDetails[r.id].submission_comment"></span>
+                        </div>
+                        <div class="pt-3 mt-3 border-t border-slate-100"
+                             x-show="requestDetails[r.id].history && requestDetails[r.id].history.length">
+                          <p class="text-xs font-medium text-slate-500 mb-2">История согласований</p>
+                          <div class="space-y-2">
+                            <template x-for="entry in requestDetails[r.id].history" :key="entry.id">
+                              <div class="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+                                <div class="flex items-start justify-between gap-3">
+                                  <div>
+                                    <div class="font-medium text-slate-800" x-text="entry.approver_name"></div>
+                                    <div class="text-xs text-slate-500" x-text="entry.approver_email"></div>
+                                  </div>
+                                  <div class="text-right shrink-0">
+                                    <div class="text-xs text-slate-400" x-text="formatDate(entry.created_at)"></div>
+                                    <span class="inline-flex rounded-full px-2 py-1 text-xs font-medium mt-1"
+                                          :class="historyDecisionClass(entry.decision)"
+                                          x-text="historyDecisionLabel(entry.decision)"></span>
+                                  </div>
+                                </div>
+                                <p class="mt-2 text-sm" x-show="entry.comment">
+                                  <span class="text-slate-400">Комментарий:</span>
+                                  <span x-text="entry.comment"></span>
+                                </p>
+                              </div>
+                            </template>
+                          </div>
                         </div>
                       </div>
                     </template>
@@ -632,6 +671,12 @@
                 </label>
               </template>
             </div>
+          </div>
+
+          <div class="card">
+            <label class="field-label">Комментарий для согласующих (необязательно)</label>
+            <textarea class="input" rows="2" x-model="form.submission_comment"
+                      placeholder="Дополнительная информация к этой отправке — попадёт в письмо"></textarea>
           </div>
 
           <div class="flex items-center justify-between">

@@ -70,6 +70,7 @@ function emptyForm() {
     minzdrav: null,
     business: { service_kind: "", duration_minutes: null, staff_involved: "", equipment: "", consumables: "", medications: "", description: "", comment: "" },
     approver_ids: [],
+    submission_comment: "",
   };
 }
 
@@ -135,7 +136,8 @@ function app() {
     myRequestsLoading: false,
     myFilters: { status: "", request_type: "", q: "" },
     expandedId: null,
-    requestDetails: {}, // id -> полная карточка заявки (GET /api/requests/{id}), кэш на сессию
+    requestDetails: {}, // id -> полная карточка заявки (GET /api/requests/{id})
+    resubmitComments: {},
 
     // ---- вкладка «Администрирование» (видна только user.is_admin) ----
     adminApprovers: [],
@@ -181,11 +183,9 @@ function app() {
         return;
       }
       this.expandedId = r.id;
-      if (!this.requestDetails[r.id]) {
-        api(`/api/requests/${r.id}`)
-          .then((detail) => { this.requestDetails[r.id] = detail; })
-          .catch(() => {});
-      }
+      api(`/api/requests/${r.id}`)
+        .then((detail) => { this.requestDetails[r.id] = detail; })
+        .catch(() => {});
     },
 
     requestTypeLabel(value) {
@@ -197,6 +197,30 @@ function app() {
       if (!this.user || !r) return false;
       if (this.user.is_admin) return true;
       return r.status === "rework" || r.status === "rejected";
+    },
+
+    canResubmitRequest(r) {
+      if (!this.user || !r) return false;
+      if (this.user.is_admin) {
+        return r.status === "rework" || r.status === "rejected" || r.status === "approved";
+      }
+      return r.status === "rework" || r.status === "rejected";
+    },
+
+    async resubmitRequest(r) {
+      try {
+        const comment = (this.resubmitComments[r.id] || "").trim();
+        await api(`/api/requests/${r.id}/resubmit`, {
+          method: "POST",
+          body: JSON.stringify({ submission_comment: comment || null }),
+        });
+        this.resubmitComments[r.id] = "";
+        delete this.requestDetails[r.id];
+        await this.loadMyRequests();
+        this.notify("success", "Заявка отправлена повторно", "Согласующие получат новое письмо.");
+      } catch (e) {
+        this.notify("error", "Не удалось отправить повторно", e.message);
+      }
     },
 
     async editRequest(r) {
@@ -213,6 +237,7 @@ function app() {
           prices: p.prices || [],
           approver_ids: p.approver_ids || [],
           mis_code: p.mis_code || "",
+          submission_comment: detail.submission_comment || p.submission_comment || "",
         };
         this.editingId = r.id;
         this.submitted = false;
@@ -238,6 +263,34 @@ function app() {
     approverName(approverId) {
       const a = this.approvers.find((x) => x.id === approverId);
       return a ? a.name : approverId;
+    },
+    approvalChipClass(decision) {
+      if (decision === "approve") return "border-green-200 bg-green-50 text-green-700";
+      if (decision === "reject") return "border-red-200 bg-red-50 text-red-700";
+      if (decision === "rework") return "border-amber-200 bg-amber-50 text-amber-700";
+      return "border-slate-200 bg-slate-50 text-slate-500";
+    },
+    approvalChipMark(decision) {
+      if (decision === "approve") return "✔";
+      if (decision === "reject") return "✕";
+      if (decision === "rework") return "↶";
+      return "…";
+    },
+    historyDecisionLabel(decision) {
+      return {
+        approve: "Согласовано",
+        reject: "Отклонено",
+        rework: "На доработку",
+        resubmit: "Повторная отправка",
+      }[decision] || decision;
+    },
+    historyDecisionClass(decision) {
+      return {
+        approve: "bg-green-50 text-green-700",
+        reject: "bg-red-50 text-red-700",
+        rework: "bg-amber-50 text-amber-700",
+        resubmit: "bg-blue-50 text-blue-700",
+      }[decision] || "bg-slate-100 text-slate-600";
     },
 
     statusLabel(status) {

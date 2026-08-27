@@ -6,12 +6,12 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from .config import get_settings
-from .database import Base, engine
+from .database import ensure_schema
 from .services import admin_store
 from .services.dictionaries import init_dictionaries
 from .routers import admin, auth, dictionaries, requests as requests_router, approvals
 
-Base.metadata.create_all(bind=engine)
+ensure_schema()
 
 
 @asynccontextmanager

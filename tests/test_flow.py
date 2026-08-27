@@ -157,7 +157,17 @@ class TestApprovalFlow:
         assert r_reject.status_code == 200
 
         status = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
-        assert status == "rejected"
+        assert status == "rework"
+
+    def test_submit_email_has_three_action_links_and_version(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "submission_comment": "Просим согласовать до пятницы"}
+        logged_in_client.post("/api/requests", json=payload)
+        html = _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local")
+        _extract_action_url(html, "approve")
+        _extract_action_url(html, "reject")
+        _extract_action_url(html, "rework")
+        assert "версия 1" in html.lower()
+        assert "Просим согласовать до пятницы" in html
 
 
 def _html_of(sent_emails: list[dict], recipient: str) -> str:
@@ -396,7 +406,7 @@ class TestRequestsRbac:
         request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
         reject_url = _extract_action_url(_html_of(client.sent_emails, "chief.doctor@clinic.local"), "reject")
         assert client.get(reject_url).status_code == 200
-        assert client.get(f"/api/requests/{request_id}").json()["status"] == "rejected"
+        assert client.get(f"/api/requests/{request_id}").json()["status"] == "rework"
 
         payload = {**SAMPLE_REQUEST_PAYLOAD, "name": "Услуга после доработки инициатором"}
         r = client.patch(f"/api/requests/{request_id}", json=payload)
@@ -448,4 +458,121 @@ class TestSmtpEnvelope:
         header, envelope = email_service._from_header_and_envelope()
         assert envelope == "svc-clinic-apps@medkvadrat.local"
         assert "svc-clinic-apps@medkvadrat.local" in header
+
+
+class TestApprovalHistoryAndResubmit:
+    def test_full_approval_writes_history_rows(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        emails = logged_in_client.sent_emails
+        logged_in_client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
+        logged_in_client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+
+        detail = logged_in_client.get(f"/api/requests/{request_id}").json()
+        assert detail["status"] == "approved"
+        assert detail["version"] == 1
+        decisions = [h["decision"] for h in detail["history"]]
+        assert decisions == ["approve", "approve"]
+        assert all(h["status_before"] == "pending" for h in detail["history"])
+        assert detail["history"][-1]["status_after"] == "approved"
+
+        via_endpoint = logged_in_client.get(f"/api/requests/{request_id}/history").json()
+        assert len(via_endpoint) == 2
+
+    def test_rework_sets_status_and_keeps_comment(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        rework_url = _extract_action_url(
+            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+        )
+        r = logged_in_client.get(rework_url + "?comment=Нужно уточнить цену")
+        assert r.status_code == 200
+        assert "доработк" in r.text.lower()
+
+        detail = logged_in_client.get(f"/api/requests/{request_id}").json()
+        assert detail["status"] == "rework"
+        assert detail["approvals"][0]["decision"] == "rework"
+        assert any(h["decision"] == "rework" and h["comment"] == "Нужно уточнить цену" for h in detail["history"])
+
+    def test_reject_is_recorded_as_reject_but_status_is_rework(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        reject_url = _extract_action_url(
+            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject"
+        )
+        logged_in_client.get(reject_url + "?comment=Недостаточно обоснования")
+        detail = logged_in_client.get(f"/api/requests/{request_id}").json()
+        assert detail["status"] == "rework"
+        assert any(h["decision"] == "reject" and h["status_after"] == "rework" for h in detail["history"])
+
+    def test_cannot_decide_after_rework(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        emails = logged_in_client.sent_emails
+        rework_url = _extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "rework")
+        approve_mis = _extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve")
+        logged_in_client.get(rework_url)
+        r = logged_in_client.get(approve_mis)
+        assert r.status_code == 200
+        assert "уже не на согласовании" in r.text.lower()
+        assert logged_in_client.get(f"/api/requests/{request_id}").json()["status"] == "rework"
+
+    def test_resubmit_from_rework_increments_version_and_resends_mail(self, logged_in_client):
+        created = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()
+        request_id = created["id"]
+        assert created["version"] == 1
+        rework_url = _extract_action_url(
+            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+        )
+        logged_in_client.get(rework_url)
+        before = len(logged_in_client.sent_emails)
+
+        r = logged_in_client.post(
+            f"/api/requests/{request_id}/resubmit",
+            json={"submission_comment": "Цену поправили"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "pending"
+        assert r.json()["version"] == 2
+        assert len(logged_in_client.sent_emails) == before + 2
+
+        detail = logged_in_client.get(f"/api/requests/{request_id}").json()
+        assert detail["version"] == 2
+        assert detail["submission_comment"] == "Цену поправили"
+        assert all(a["decision"] is None for a in detail["approvals"])
+        assert any(h["decision"] == "resubmit" for h in detail["history"])
+        html = _html_of(logged_in_client.sent_emails[-2:], "chief.doctor@clinic.local")
+        assert "версия 2" in html.lower()
+        assert "Цену поправили" in html
+
+    def test_employee_cannot_resubmit_pending(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        assert client.post(f"/api/requests/{request_id}/resubmit", json={}).status_code == 403
+
+    def test_employee_cannot_resubmit_someone_elses_rework(self, client):
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        rework_url = _extract_action_url(_html_of(client.sent_emails, "chief.doctor@clinic.local"), "rework")
+        client.get(rework_url)
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        assert client.post(f"/api/requests/{request_id}/resubmit", json={}).status_code == 403
+
+    def test_admin_can_resubmit_approved(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        emails = logged_in_client.sent_emails
+        logged_in_client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
+        logged_in_client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+        assert logged_in_client.get(f"/api/requests/{request_id}").json()["status"] == "approved"
+
+        r = logged_in_client.post(f"/api/requests/{request_id}/resubmit", json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "pending"
+        assert r.json()["version"] == 2
+
+    def test_owner_cannot_resubmit_approved(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        emails = client.sent_emails
+        client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
+        client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+        assert client.get(f"/api/requests/{request_id}").json()["status"] == "approved"
+        assert client.post(f"/api/requests/{request_id}/resubmit", json={}).status_code == 403
 
