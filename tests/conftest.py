@@ -123,5 +123,6 @@ SAMPLE_REQUEST_PAYLOAD = {
     "sex_limit": "all",
     "is_lab_service": False,
     "minzdrav": {"code": "B01.047.002", "name": "Прием врача-терапевта повторный"},
+    "business": {"description": "Повторный приём терапевта — расширение прейскуранта ДМС и ОМС."},
     "approver_ids": ["chief_doctor", "mis_admin"],
 }

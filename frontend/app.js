@@ -50,6 +50,7 @@ function emptyForm() {
   return {
     request_type: "new_service",
     name: "",
+    mis_code: "",
     service_type: "simple",
     price_list: "both",
     all_branches: false,
@@ -94,6 +95,7 @@ function app() {
     },
 
     form: emptyForm(),
+    editingId: null,
     branches: [],
     approvers: [],
     requestTypes: [
@@ -113,7 +115,7 @@ function app() {
 
     uniformPrice: null,
     showOptional: false,
-    showBusiness: false,
+    showBusiness: true,
 
     minzdravQuery: "",
     minzdravResults: [],
@@ -131,6 +133,7 @@ function app() {
     activeTab: "new", // 'new' | 'my' | 'admin'
     myRequests: [],
     myRequestsLoading: false,
+    myFilters: { status: "", request_type: "", q: "" },
     expandedId: null,
     requestDetails: {}, // id -> полная карточка заявки (GET /api/requests/{id}), кэш на сессию
 
@@ -158,9 +161,15 @@ function app() {
     async loadMyRequests() {
       this.myRequestsLoading = true;
       try {
-        this.myRequests = await api("/api/requests");
+        const p = new URLSearchParams();
+        if (this.myFilters.status) p.set("status", this.myFilters.status);
+        if (this.myFilters.request_type) p.set("request_type", this.myFilters.request_type);
+        if (this.myFilters.q) p.set("q", this.myFilters.q);
+        const qs = p.toString();
+        this.myRequests = await api("/api/requests" + (qs ? `?${qs}` : ""));
       } catch (e) {
         this.myRequests = [];
+        this.notify("error", "Не удалось загрузить заявки", e.message);
       } finally {
         this.myRequestsLoading = false;
       }
@@ -179,19 +188,73 @@ function app() {
       }
     },
 
+    requestTypeLabel(value) {
+      const found = this.requestTypes.find((x) => x.value === value);
+      return found ? found.label : (value || "");
+    },
+
+    canEditRequest(r) {
+      if (!this.user || !r) return false;
+      if (this.user.is_admin) return true;
+      return r.status === "rework" || r.status === "rejected";
+    },
+
+    async editRequest(r) {
+      try {
+        const detail = this.requestDetails[r.id] || await api(`/api/requests/${r.id}`);
+        this.requestDetails[r.id] = detail;
+        const p = detail.payload || {};
+        const blank = emptyForm();
+        this.form = {
+          ...blank,
+          ...p,
+          lab: { ...blank.lab, ...(p.lab || {}) },
+          business: { ...blank.business, ...(p.business || {}) },
+          prices: p.prices || [],
+          approver_ids: p.approver_ids || [],
+          mis_code: p.mis_code || "",
+        };
+        this.editingId = r.id;
+        this.submitted = false;
+        this.showBusiness = true;
+        this.activeTab = "new";
+      } catch (e) {
+        this.notify("error", "Не удалось открыть заявку", e.message);
+      }
+    },
+
+    async deleteRequest(id) {
+      if (!confirm("Удалить заявку? Это действие нельзя отменить.")) return;
+      try {
+        await api(`/api/requests/${id}`, { method: "DELETE" });
+        this.myRequests = this.myRequests.filter((x) => x.id !== id);
+        if (this.expandedId === id) this.expandedId = null;
+        this.notify("success", "Заявка удалена", "Запись удалена из журнала.");
+      } catch (e) {
+        this.notify("error", "Не удалось удалить заявку", e.message);
+      }
+    },
+
     approverName(approverId) {
       const a = this.approvers.find((x) => x.id === approverId);
       return a ? a.name : approverId;
     },
 
     statusLabel(status) {
-      return { pending: "На согласовании", approved: "Согласовано", rejected: "Отклонено", imported: "Внесено в МИС" }[status] || status;
+      return {
+        pending: "На согласовании",
+        approved: "Согласовано",
+        rejected: "Отклонено",
+        rework: "На доработке",
+        imported: "Внесено в МИС",
+      }[status] || status;
     },
     statusBadgeClass(status) {
       return {
         pending: "bg-amber-50 text-amber-700",
         approved: "bg-green-50 text-green-700",
         rejected: "bg-red-50 text-red-700",
+        rework: "bg-amber-50 text-amber-700",
         imported: "bg-blue-50 text-blue-700",
       }[status] || "bg-slate-100 text-slate-600";
     },
@@ -314,6 +377,7 @@ function app() {
       await api("/api/auth/logout", { method: "POST" });
       this.user = null;
       this.form = emptyForm();
+      this.editingId = null;
     },
 
     // ---- цены по филиалам ----
@@ -422,21 +486,32 @@ function app() {
         this.notify("error", "Не хватает данных", "Выберите хотя бы одного согласующего.");
         return;
       }
+      if (!(this.form.business && (this.form.business.description || "").trim())) {
+        this.notify("error", "Не хватает данных", "Укажите деловое обоснование (суть услуги).");
+        this.showBusiness = true;
+        return;
+      }
       this.loading = true;
       try {
         const payload = JSON.parse(JSON.stringify(this.form));
         if (!payload.is_lab_service) payload.lab = null;
-        // Дата начала/окончания — необязательные поля, но обычный <input type="date">
-        // на x-model без модификатора отдаёт "" (не null), когда дата не выбрана.
-        // Бэкенд теперь тоже приводит "" -> None (см. schemas.py), но нормализуем
-        // и здесь, чтобы поведение не зависело от конкретной версии API.
         if (!payload.date_start) payload.date_start = null;
         if (!payload.date_end) payload.date_end = null;
-        const res = await api("/api/requests", { method: "POST", body: JSON.stringify(payload) });
-        this.submitted = true;
-        this.submittedId = res.id;
+        if (!payload.mis_code) payload.mis_code = null;
+        if (this.editingId) {
+          await api(`/api/requests/${this.editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
+          this.notify("success", "Изменения сохранены", "Карточка заявки обновлена.");
+          this.editingId = null;
+          this.form = emptyForm();
+          this.activeTab = "my";
+          await this.loadMyRequests();
+        } else {
+          const res = await api("/api/requests", { method: "POST", body: JSON.stringify(payload) });
+          this.submitted = true;
+          this.submittedId = res.id;
+        }
       } catch (e) {
-        this.notify("error", "Не удалось отправить заявку", e.message);
+        this.notify("error", this.editingId ? "Не удалось сохранить заявку" : "Не удалось отправить заявку", e.message);
       } finally {
         this.loading = false;
       }
@@ -444,6 +519,7 @@ function app() {
 
     resetForm() {
       this.form = emptyForm();
+      this.editingId = null;
       this.uniformPrice = null;
       this.submitted = false;
       this.submittedId = null;

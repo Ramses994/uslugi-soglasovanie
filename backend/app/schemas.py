@@ -92,6 +92,7 @@ class ServiceRequestIn(BaseModel):
 
     # --- обязательные поля карточки услуги МИС ---
     name: str = Field(..., min_length=3, max_length=255, description="Наименование (как в МИС)")
+    mis_code: Optional[str] = Field(None, max_length=64, description="Код услуги в МИС Медиалог (поле CODE при импорте)")
     service_type: ServiceType
     price_list: PriceListType = PriceListType.both
     prices: list[BranchPrice] = Field(..., min_length=1)
@@ -119,6 +120,13 @@ class ServiceRequestIn(BaseModel):
         if isinstance(v, str) and not v.strip():
             return None
         return v
+
+    @field_validator("mis_code", mode="before")
+    @classmethod
+    def _blank_mis_code_to_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v.strip() if isinstance(v, str) else v
     sex_limit: Sex = Sex.all
     age_from: Optional[float] = Field(None, ge=0)
     age_to: Optional[float] = Field(None, ge=0)
@@ -142,6 +150,12 @@ class ServiceRequestIn(BaseModel):
             raise ValueError("Для лабораторной услуги обязателен блок 'lab' (ЕРЛУ-КДЛ)")
         if self.age_from is not None and self.age_to is not None and self.age_from > self.age_to:
             raise ValueError("'age_from' не может быть больше 'age_to'")
+        # Деловое обоснование — вложенный объект business (не плоская строка).
+        # Обязательна «суть услуги» (description): без неё согласующие не видят,
+        # зачем услуга нужна, и заявка не должна уходить на согласование.
+        desc = (self.business.description if self.business else None) or ""
+        if not str(desc).strip():
+            raise ValueError("Укажите деловое обоснование (суть услуги)")
         return self
 
 

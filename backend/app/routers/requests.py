@@ -1,8 +1,9 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -11,7 +12,7 @@ from ..schemas import ServiceRequestIn, UserProfile
 from ..services.email_service import render_template, try_send_email
 from ..security import make_approval_token
 from ..config import get_settings
-from .auth import get_current_user
+from .auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 settings = get_settings()
@@ -100,34 +101,122 @@ def create_request(
     return {"id": entity.id, "status": entity.status}
 
 
-@router.get("")
-def list_requests(db: Session = Depends(get_db), user: UserProfile = Depends(get_current_user)):
-    items = db.query(ServiceRequest).order_by(ServiceRequest.created_at.desc()).limit(200).all()
-    return [
-        {
-            "id": r.id,
-            "name": r.payload.get("name"),
-            "status": r.status,
-            "initiator_name": r.initiator_name,
-            "created_at": r.created_at,
-            "approvals": r.approvals,
-        }
-        for r in items
-    ]
+_OWNER_EDITABLE_STATUSES = {RequestStatus.rejected, RequestStatus.rework}
 
 
-@router.get("/{request_id}")
-def get_request(request_id: str, db: Session = Depends(get_db), user: UserProfile = Depends(get_current_user)):
-    r = db.get(ServiceRequest, request_id)
-    if not r:
+def _can_view(user: UserProfile, row: ServiceRequest) -> bool:
+    return user.is_admin or row.initiator_login.lower() == user.login.lower()
+
+
+def _get_visible_request(db: Session, request_id: str, user: UserProfile) -> ServiceRequest:
+    row = db.get(ServiceRequest, request_id)
+    if not row:
         raise HTTPException(404, "Заявка не найдена")
+    if not _can_view(user, row):
+        raise HTTPException(403, "Недостаточно прав для просмотра этой заявки")
+    return row
+
+
+def _list_item(r: ServiceRequest) -> dict:
+    payload = r.payload or {}
+    return {
+        "id": r.id,
+        "name": payload.get("name"),
+        "request_type": r.request_type,
+        "status": r.status,
+        "initiator_name": r.initiator_name,
+        "initiator_login": r.initiator_login,
+        "created_at": r.created_at,
+        "approvals": r.approvals,
+    }
+
+
+def _detail(r: ServiceRequest) -> dict:
     return {
         "id": r.id,
         "status": r.status,
+        "request_type": r.request_type,
         "payload": r.payload,
         "approvals": r.approvals,
+        "initiator_login": r.initiator_login,
         "initiator_name": r.initiator_name,
         "initiator_email": r.initiator_email,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
+
+
+@router.get("")
+def list_requests(
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(get_current_user),
+    status: Optional[RequestStatus] = Query(None),
+    request_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+):
+    """Администратор формы видит все заявки; сотрудник — только свои.
+    Фильтры status / request_type / q (поиск по наименованию и ФИО инициатора)
+    доступны обоим, но всегда поверх уже ограниченной выборки."""
+    query = db.query(ServiceRequest)
+    if not user.is_admin:
+        query = query.filter(ServiceRequest.initiator_login == user.login)
+    if status is not None:
+        query = query.filter(ServiceRequest.status == status)
+    if request_type:
+        query = query.filter(ServiceRequest.request_type == request_type)
+    rows = query.order_by(ServiceRequest.created_at.desc()).limit(200).all()
+    items = [_list_item(r) for r in rows]
+    needle = (q or "").strip().lower()
+    if needle:
+        items = [
+            i for i in items
+            if needle in (i.get("name") or "").lower()
+            or needle in (i.get("initiator_name") or "").lower()
+        ]
+    return items
+
+
+@router.get("/{request_id}")
+def get_request(request_id: str, db: Session = Depends(get_db), user: UserProfile = Depends(get_current_user)):
+    return _detail(_get_visible_request(db, request_id, user))
+
+
+@router.patch("/{request_id}")
+def update_request(
+    request_id: str,
+    body: ServiceRequestIn,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(get_current_user),
+):
+    """Админ может править заявку в любом статусе. Сотрудник — только свою
+    и только если она отклонена / отправлена на доработку (rejected или rework).
+    После отправки на согласование (pending) правка сотруднику закрыта."""
+    row = db.get(ServiceRequest, request_id)
+    if not row:
+        raise HTTPException(404, "Заявка не найдена")
+    if not user.is_admin:
+        if row.initiator_login.lower() != user.login.lower():
+            raise HTTPException(403, "Вы не владелец этой заявки")
+        if row.status not in _OWNER_EDITABLE_STATUSES:
+            raise HTTPException(403, "Заявку нельзя редактировать в текущем статусе")
+    row.payload = json.loads(body.model_dump_json())
+    row.request_type = body.request_type
+    row.updated_at = datetime.utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return _detail(row)
+
+
+@router.delete("/{request_id}", status_code=204)
+def delete_request(
+    request_id: str,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(require_admin),
+):
+    row = db.get(ServiceRequest, request_id)
+    if not row:
+        raise HTTPException(404, "Заявка не найдена")
+    db.delete(row)
+    db.commit()
+    return None

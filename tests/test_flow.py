@@ -329,3 +329,107 @@ class TestValidationErrorFormat:
         payload = {**SAMPLE_REQUEST_PAYLOAD, "date_start": "", "date_end": ""}
         r = logged_in_client.post("/api/requests", json=payload)
         assert r.status_code == 201, r.text
+
+    def test_missing_business_justification_is_422(self, logged_in_client):
+        payload = {k: v for k, v in SAMPLE_REQUEST_PAYLOAD.items() if k != "business"}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+
+    def test_blank_business_description_is_422(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "business": {"description": "   "}}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# RBAC списка/карточки заявок, фильтры, DELETE/PATCH, код МИС в экспорте
+# ---------------------------------------------------------------------------
+
+class TestRequestsRbac:
+    def test_employee_sees_only_own_requests(self, client):
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        admin_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        own_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+
+        listed = client.get("/api/requests").json()
+        ids = {item["id"] for item in listed}
+        assert own_id in ids
+        assert admin_id not in ids
+        assert client.get(f"/api/requests/{admin_id}").status_code == 403
+        assert client.get(f"/api/requests/{own_id}").status_code == 200
+
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        admin_listed = {item["id"] for item in client.get("/api/requests").json()}
+        assert admin_id in admin_listed and own_id in admin_listed
+
+    def test_employee_cannot_delete_request(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        assert client.delete(f"/api/requests/{request_id}").status_code == 403
+        assert client.get(f"/api/requests/{request_id}").status_code == 200
+
+    def test_admin_can_delete_request(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        assert logged_in_client.delete(f"/api/requests/{request_id}").status_code == 204
+        assert logged_in_client.get(f"/api/requests/{request_id}").status_code == 404
+        assert logged_in_client.delete(f"/api/requests/{request_id}").status_code == 404
+
+    def test_employee_cannot_patch_pending(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "name": "Изменённое наименование услуги"}
+        assert client.patch(f"/api/requests/{request_id}", json=payload).status_code == 403
+
+    def test_admin_can_patch_pending(self, logged_in_client):
+        request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "name": "Изменённое наименование услуги"}
+        r = logged_in_client.patch(f"/api/requests/{request_id}", json=payload)
+        assert r.status_code == 200, r.text
+        assert r.json()["payload"]["name"] == "Изменённое наименование услуги"
+
+    def test_employee_can_patch_rejected(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        reject_url = _extract_action_url(_html_of(client.sent_emails, "chief.doctor@clinic.local"), "reject")
+        assert client.get(reject_url).status_code == 200
+        assert client.get(f"/api/requests/{request_id}").json()["status"] == "rejected"
+
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "name": "Услуга после доработки инициатором"}
+        r = client.patch(f"/api/requests/{request_id}", json=payload)
+        assert r.status_code == 200, r.text
+        assert r.json()["payload"]["name"] == "Услуга после доработки инициатором"
+
+
+class TestRequestFilters:
+    def test_filter_by_status_and_type_and_search(self, logged_in_client):
+        logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
+        promo = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "promo", "name": "Акция УЗИ щитовидной железы"}
+        promo_id = logged_in_client.post("/api/requests", json=promo).json()["id"]
+
+        by_type = logged_in_client.get("/api/requests?request_type=promo").json()
+        assert {item["id"] for item in by_type} == {promo_id}
+
+        by_search = logged_in_client.get("/api/requests?q=щитовидной").json()
+        assert {item["id"] for item in by_search} == {promo_id}
+        assert logged_in_client.get("/api/requests?q=zzzznotfound").json() == []
+
+        pending = logged_in_client.get("/api/requests?status=pending").json()
+        assert all(item["status"] == "pending" for item in pending)
+        assert len(pending) >= 2
+
+
+class TestMisCodeExport:
+    def test_mis_code_goes_to_import_code_column(self, logged_in_client):
+        from app.schemas import ServiceRequestIn
+        from app.services.medialog_export import build_import_workbook
+
+        req = ServiceRequestIn.model_validate({**SAMPLE_REQUEST_PAYLOAD, "mis_code": "01.01.001"})
+        wb = openpyxl.load_workbook(io.BytesIO(build_import_workbook(req)))
+        rows = list(wb.active.iter_rows(min_row=2, values_only=True))
+        assert rows
+        assert all(row[0] == "01.01.001" for row in rows)
+

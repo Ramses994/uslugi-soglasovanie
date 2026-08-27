@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Согласование услуг — МИС Медиалог</title>
+<title>Согласование услуг — Медквадрат</title>
+<link rel="icon" href="medkvadrat-favicon.ico">
 <!--
   ВАЖНО: Tailwind и Alpine.js подключены из локальных файлов (frontend/vendor/), а НЕ
   с публичных CDN (cdn.tailwindcss.com, cdn.jsdelivr.net). Это не стилистический выбор —
@@ -20,6 +21,10 @@
 <style>
   body { font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
   [x-cloak] { display: none !important; }
+  /* Цвета ближе к medkvadrat.ru (красный квадрат логотипа), без пересборки Tailwind. */
+  .btn-primary { background-color: #ef4136; }
+  .btn-primary:hover { background-color: #d13228; }
+  .input:focus { border-color: #ef4136; --tw-ring-color: rgba(239, 65, 54, .45); }
 </style>
 </head>
 <body class="bg-slate-50 min-h-screen">
@@ -54,9 +59,10 @@
     <div class="min-h-screen flex items-center justify-center px-4">
       <div class="card w-full max-w-sm">
         <div class="text-center mb-6">
-          <div class="mx-auto w-12 h-12 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-lg mb-3">М</div>
+          <img src="medkvadrat-logo.png" alt="Медквадрат" class="mx-auto h-12 w-12 rounded-xl mb-3">
           <h1 class="text-lg font-semibold text-slate-900">Согласование прейскуранта</h1>
-          <p class="text-sm text-slate-500 mt-1">Войдите с доменной учётной записью</p>
+          <p class="text-slate-400 mt-1" style="font-size:10px;line-height:1.3">МИС «Медиалог» 8.10.04.R</p>
+          <p class="text-sm text-slate-500 mt-2">Войдите с доменной учётной записью</p>
         </div>
         <form @submit.prevent="login()">
           <label class="field-label">Логин (домен\\пользователь или пользователь)</label>
@@ -79,10 +85,10 @@
       <header class="bg-white border-b border-slate-200 sticky top-0 z-30">
         <div class="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
           <div class="flex items-center gap-3">
-            <div class="w-9 h-9 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold">М</div>
+            <img src="medkvadrat-logo.png" alt="Медквадрат" class="h-9 w-9 rounded-lg">
             <div>
               <div class="text-sm font-semibold text-slate-900">Форма согласования услуг</div>
-              <div class="text-xs text-slate-500">МИС «Медиалог» 8.10.04.R</div>
+              <div class="text-slate-400" style="font-size:10px;line-height:1.2">МИС «Медиалог» 8.10.04.R</div>
             </div>
           </div>
           <div class="flex items-center gap-3 text-sm">
@@ -103,7 +109,8 @@
           <button type="button"
                   @click="activeTab = 'my'; loadMyRequests()"
                   :class="activeTab === 'my' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'"
-                  class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition">Мои заявки</button>
+                  class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition"
+                  x-text="user.is_admin ? 'Заявки' : 'Мои заявки'"></button>
           <button type="button" x-show="user.is_admin"
                   @click="activeTab = 'admin'; loadAdmin()"
                   :class="activeTab === 'admin' ? 'border-blue-600 text-blue-700' : 'border-transparent text-slate-500 hover:text-slate-700'"
@@ -116,8 +123,38 @@
         <!-- ============ ВКЛАДКА «МОИ ЗАЯВКИ» ============ -->
         <div x-show="activeTab === 'my'" x-cloak>
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-base font-semibold text-slate-900">Мои заявки</h2>
+            <h2 class="text-base font-semibold text-slate-900" x-text="user.is_admin ? 'Заявки' : 'Мои заявки'"></h2>
             <button class="text-sm text-blue-600 hover:underline" @click="loadMyRequests()">↻ Обновить</button>
+          </div>
+
+          <div class="card mb-4 !py-1.5">
+            <div class="grid sm:grid-cols-3 gap-3">
+              <div>
+                <label class="field-label">Статус</label>
+                <select class="input" x-model="myFilters.status" @change="loadMyRequests()">
+                  <option value="">Все статусы</option>
+                  <option value="pending">На согласовании</option>
+                  <option value="approved">Согласовано</option>
+                  <option value="rejected">Отклонено</option>
+                  <option value="rework">На доработке</option>
+                  <option value="imported">Внесено в МИС</option>
+                </select>
+              </div>
+              <div>
+                <label class="field-label">Тип заявки</label>
+                <select class="input" x-model="myFilters.request_type" @change="loadMyRequests()">
+                  <option value="">Все типы</option>
+                  <template x-for="rt in requestTypes" :key="rt.value">
+                    <option :value="rt.value" x-text="rt.label"></option>
+                  </template>
+                </select>
+              </div>
+              <div>
+                <label class="field-label">Поиск</label>
+                <input class="input" x-model="myFilters.q" @input.debounce.400="loadMyRequests()"
+                       placeholder="Наименование или инициатор">
+              </div>
+            </div>
           </div>
 
           <template x-if="myRequestsLoading">
@@ -136,6 +173,7 @@
                     <div class="font-medium text-slate-900" x-text="r.name"></div>
                     <div class="text-xs text-slate-500 mt-0.5">
                       №<span x-text="r.id.slice(0,8)"></span> ·
+                      <span x-text="requestTypeLabel(r.request_type)"></span> ·
                       <span x-text="r.initiator_name"></span> ·
                       <span x-text="formatDate(r.created_at)"></span>
                     </div>
@@ -155,6 +193,15 @@
                   </template>
                 </div>
 
+                <div class="mt-3 flex flex-wrap gap-3" @click.stop>
+                  <button type="button" class="text-sm text-blue-600 hover:underline"
+                          x-show="canEditRequest(r)"
+                          @click="editRequest(r)">Редактировать</button>
+                  <button type="button" class="text-sm text-red-500 hover:underline"
+                          x-show="user.is_admin"
+                          @click="deleteRequest(r.id)">Удалить</button>
+                </div>
+
                 <!-- Детали заявки — подгружаются по клику на карточку -->
                 <template x-if="expandedId === r.id">
                   <div class="mt-4 pt-4 border-t border-slate-100 text-sm text-slate-600">
@@ -168,6 +215,10 @@
                             <span class="mr-2" x-text="p.branch + ': ' + p.price.toFixed(2) + ' ₽'"></span>
                           </template>
                         </div>
+                        <div x-show="requestDetails[r.id].payload.mis_code">
+                          <span class="text-slate-400">Код МИС:</span>
+                          <span x-text="requestDetails[r.id].payload.mis_code"></span>
+                        </div>
                         <div x-show="requestDetails[r.id].payload.minzdrav">
                           <span class="text-slate-400">Код Минздрава:</span>
                           <span x-text="requestDetails[r.id].payload.minzdrav?.code + ' — ' + requestDetails[r.id].payload.minzdrav?.name"></span>
@@ -175,6 +226,10 @@
                         <div x-show="requestDetails[r.id].payload.description">
                           <span class="text-slate-400">Описание:</span>
                           <span x-text="requestDetails[r.id].payload.description"></span>
+                        </div>
+                        <div x-show="requestDetails[r.id].payload.business?.description">
+                          <span class="text-slate-400">Обоснование:</span>
+                          <span x-text="requestDetails[r.id].payload.business?.description"></span>
                         </div>
                       </div>
                     </template>
@@ -312,6 +367,12 @@
                      required maxlength="255"
                      placeholder="Например: Приём врача-терапевта повторный">
               <p class="text-xs text-slate-400 mt-1">Код Минздрава ниже подбирается автоматически по этому названию — при уверенном совпадении подставится сам, его можно снять крестиком или заменить вручную через поиск.</p>
+            </div>
+
+            <div class="mb-4">
+              <label class="field-label">Код услуги в МИС Медиалог <span class="text-slate-400 font-normal">(опционально)</span></label>
+              <input class="input" x-model="form.mis_code" maxlength="64" placeholder="Например: 01.01.001">
+              <p class="text-xs text-slate-400 mt-1">Попадёт в колонку CODE файла импорта после согласования. Если не указан — код задаёт администратор МИС при импорте.</p>
             </div>
 
             <div class="grid sm:grid-cols-2 gap-4 mb-4">
@@ -516,7 +577,7 @@
           <!-- Деловое обоснование -->
           <div class="card">
             <button type="button" class="flex items-center justify-between w-full" @click="showBusiness = !showBusiness">
-              <h2 class="text-base font-semibold text-slate-900">6. Деловое обоснование</h2>
+              <h2 class="text-base font-semibold text-slate-900">6. Деловое обоснование *</h2>
               <span class="text-slate-400" x-text="showBusiness ? '▲' : '▼'"></span>
             </button>
             <div x-show="showBusiness" x-transition class="mt-4 space-y-4">
@@ -551,8 +612,9 @@
                 </div>
               </div>
               <div>
-                <label class="field-label">Суть услуги, позиционирование, продвижение</label>
-                <textarea class="input" rows="2" x-model="form.business.description"></textarea>
+                <label class="field-label">Суть услуги, позиционирование, продвижение *</label>
+                <textarea class="input" rows="2" x-model="form.business.description" required
+                          placeholder="Зачем услуга нужна, кому предлагается, как будет продвигаться"></textarea>
               </div>
             </div>
           </div>
@@ -575,7 +637,8 @@
           <div class="flex items-center justify-between">
             <p class="text-xs text-slate-500">Инициатор: <span x-text="user.display_name"></span> (<span x-text="user.email"></span>) — подставляется автоматически из AD.</p>
             <button class="btn-primary" type="submit" :disabled="loading">
-              <span x-show="!loading">Отправить на согласование</span>
+              <span x-show="!loading && !editingId">Отправить на согласование</span>
+              <span x-show="!loading && editingId">Сохранить изменения</span>
               <span x-show="loading">Отправка…</span>
             </button>
           </div>

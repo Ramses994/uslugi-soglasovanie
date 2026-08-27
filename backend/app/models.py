@@ -20,6 +20,7 @@ class RequestStatus(str, enum.Enum):
     pending = "pending"           # отправлена, ждёт согласований
     approved = "approved"         # согласована всеми
     rejected = "rejected"         # отклонена хотя бы одним согласующим
+    rework = "rework"             # отправлена на доработку инициатору
     imported = "imported"         # администратор МИС подтвердил внесение в Медиалог
 
 

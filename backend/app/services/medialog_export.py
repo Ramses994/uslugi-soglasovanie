@@ -50,11 +50,14 @@ def build_import_workbook(req: ServiceRequestIn, generated_code_hint: str = "") 
     ws.append(COLUMNS)
 
     insurance_types = ["D", "O"] if req.price_list.value == "both" else [_PRICE_LIST_MAP[req.price_list.value]]
+    # Если заявитель/админ указал код МИС — он идёт в CODE; иначе подсказка генератора
+    # (часто пустая: код присваивает администратор МИС при импорте).
+    code = (req.mis_code or "").strip() or generated_code_hint
 
     for bp in req.prices:
         for ins in insurance_types:
             ws.append([
-                generated_code_hint,                       # CODE — присваивается администратором МИС при импорте/создании
+                code,                                      # CODE — код услуги в МИС, если указан; иначе подсказка/пусто
                 ins,                                        # INSURANCE_TYPE
                 req.name,                                   # LABEL
                 req.short_name or "",                        # SHORT_LABEL
