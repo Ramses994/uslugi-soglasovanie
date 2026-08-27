@@ -17,6 +17,7 @@ import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, parseaddr
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -40,6 +41,20 @@ def render_template(name: str, **context) -> str:
     return _env.get_template(name).render(**context)
 
 
+def _from_header_and_envelope() -> tuple[str, str]:
+    """Разделяем заголовок From и SMTP MAIL FROM.
+
+    SMTP_FROM часто задают как «Имя <user@domain>». Если эту строку целиком
+    отдать в smtplib.sendmail(), Exchange отвечает 550 5.7.60
+    «Client does not have permissions to send as this sender»: конверт не
+    совпадает с ящиком, под которым прошла AUTH. В MAIL FROM нужен только адрес.
+    """
+    name, addr = parseaddr(settings.smtp_from or "")
+    envelope = (addr or settings.smtp_user or "").strip() or (settings.smtp_from or "")
+    header = formataddr((name, envelope)) if name else envelope
+    return header, envelope
+
+
 def send_email(
     to: list[str],
     subject: str,
@@ -47,9 +62,10 @@ def send_email(
     reply_to: str | None = None,
     user_credentials: tuple[str, str] | None = None,
 ) -> None:
+    from_header, envelope_from = _from_header_and_envelope()
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from
+    msg["From"] = from_header
     msg["To"] = ", ".join(to)
     if reply_to:
         msg["Reply-To"] = reply_to
@@ -62,7 +78,7 @@ def send_email(
             server.login(user_credentials[0], user_credentials[1])
         elif settings.smtp_user:
             server.login(settings.smtp_user, settings.smtp_password)
-        server.sendmail(settings.smtp_from, to, msg.as_string())
+        server.sendmail(envelope_from, to, msg.as_string())
 
 
 def try_send_email(to: list[str], subject: str, html_body: str, **kwargs) -> bool:
@@ -87,9 +103,10 @@ def send_email_with_attachment(
     attachment_filename: str,
     reply_to: str | None = None,
 ) -> None:
+    from_header, envelope_from = _from_header_and_envelope()
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
-    msg["From"] = settings.smtp_from
+    msg["From"] = from_header
     msg["To"] = ", ".join(to)
     if reply_to:
         msg["Reply-To"] = reply_to
@@ -112,7 +129,7 @@ def send_email_with_attachment(
             server.starttls()
         if settings.smtp_user:
             server.login(settings.smtp_user, settings.smtp_password)
-        server.sendmail(settings.smtp_from, to, msg.as_string())
+        server.sendmail(envelope_from, to, msg.as_string())
 
 
 def try_send_email_with_attachment(to: list[str], subject: str, html_body: str, **kwargs) -> bool:

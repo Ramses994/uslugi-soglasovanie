@@ -433,3 +433,19 @@ class TestMisCodeExport:
         assert rows
         assert all(row[0] == "01.01.001" for row in rows)
 
+
+class TestSmtpEnvelope:
+    def test_display_name_in_smtp_from_is_not_used_as_envelope(self, monkeypatch):
+        # Регресс на 550 5.7.60 Exchange: MAIL FROM = «Имя <addr>» целиком.
+        import app.services.email_service as email_service
+
+        monkeypatch.setattr(
+            email_service.settings,
+            "smtp_from",
+            "Согласование услуг МИС <svc-clinic-apps@medkvadrat.local>",
+        )
+        monkeypatch.setattr(email_service.settings, "smtp_user", "svc-clinic-apps@medkvadrat.local")
+        header, envelope = email_service._from_header_and_envelope()
+        assert envelope == "svc-clinic-apps@medkvadrat.local"
+        assert "svc-clinic-apps@medkvadrat.local" in header
+
