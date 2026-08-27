@@ -1,2 +1,6 @@
 -r requirements.txt
 pytest==8.3.3
+# Нужен fastapi.testclient.TestClient (обёртка над httpx) — без него импорт
+# tests/conftest.py падает. Отсутствовал в исходном requirements-dev.txt,
+# обнаружено при первом прогоне pytest на чистой копии.
+httpx==0.27.2

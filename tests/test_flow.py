@@ -250,3 +250,72 @@ class TestAdminRole:
         logged_in_client.delete("/api/admin/branches/test_branch")
         public_branches_after = logged_in_client.get("/api/dictionaries/branches").json()
         assert "Тестовый филиал" not in public_branches_after
+
+
+# ---------------------------------------------------------------------------
+# 12.9 — подбор согласующих из каталога AD, авто-подстановка кода Минздрава,
+# читаемые ошибки валидации (см. ТЗ.md, раздел 12.9)
+# ---------------------------------------------------------------------------
+
+class TestDirectorySearch:
+    def test_regular_user_cannot_search_directory(self, client):
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        assert client.get("/api/admin/directory/search?q=иванов").status_code == 403
+
+    def test_admin_can_search_directory_by_name(self, logged_in_client):
+        # LDAP_MOCK=true -> ldap_auth._mock_search_directory ищет по фиксированному
+        # демо-набору (_MOCK_USERS + _MOCK_DIRECTORY_EXTRA), без реального AD.
+        r = logged_in_client.get("/api/admin/directory/search?q=иванов")
+        assert r.status_code == 200
+        results = r.json()
+        assert any(u["login"] == "ivanov" for u in results)
+        assert all(u["email"] for u in results)  # без email согласующего не добавить
+
+    def test_admin_can_search_directory_by_login_substring(self, logged_in_client):
+        r = logged_in_client.get("/api/admin/directory/search?q=petr")
+        assert r.status_code == 200
+        assert any(u["login"] == "petrova" for u in r.json())
+
+    def test_directory_search_empty_query_returns_pool(self, logged_in_client):
+        r = logged_in_client.get("/api/admin/directory/search?q=")
+        assert r.status_code == 200
+        assert len(r.json()) >= 2  # хотя бы ivanov + petrova
+
+
+class TestMinzdravAutoSuggest:
+    def test_short_name_returns_no_suggestion(self, logged_in_client):
+        r = logged_in_client.get("/api/dictionaries/minzdrav/suggest?name=узи")
+        assert r.status_code == 200
+        assert r.json() is None  # короче 4 символов — не пытаемся угадывать
+
+    def test_exact_name_match_returns_confident_suggestion(self, logged_in_client):
+        # Берём реальное наименование из справочника (первую АКТИВНУЮ запись),
+        # чтобы не зависеть от конкретных кодов — устойчиво к обновлению файла
+        # НСИ Минздрава. best_minzdrav_match_scored игнорирует неактивные записи.
+        sample = next(e for e in store.minzdrav if e.active)
+        r = logged_in_client.get(f"/api/dictionaries/minzdrav/suggest?name={sample.name}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body is not None
+        assert body["code"] == sample.code
+        assert body["score"] >= 0.55
+
+    def test_gibberish_name_returns_no_suggestion(self, logged_in_client):
+        r = logged_in_client.get("/api/dictionaries/minzdrav/suggest?name=asdfqwertyzxcv0000")
+        assert r.status_code == 200
+        assert r.json() is None
+
+
+class TestValidationErrorFormat:
+    def test_422_detail_is_a_list_of_field_errors_not_opaque_objects(self, logged_in_client):
+        # Регресс-тест на баг из раздела 12.9: фронтенд раньше показывал
+        # "[object Object],[object Object]" для точно такого ответа — сам бэкенд
+        # тут ни при чём (FastAPI и раньше отдавал detail корректно), но полезно
+        # зафиксировать форму ответа, на которую опирается formatApiErrorDetail()
+        # в app.js, чтобы будущий рефакторинг API не сломал фронтенд молча.
+        bad_payload = {**SAMPLE_REQUEST_PAYLOAD, "prices": []}  # нарушает min_length=1
+        r = logged_in_client.post("/api/requests", json=bad_payload)
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert isinstance(detail, list)
+        assert all("msg" in item and "loc" in item for item in detail)

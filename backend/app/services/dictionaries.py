@@ -142,6 +142,26 @@ class DictionaryStore:
         scored.sort(key=lambda t: t[0], reverse=True)
         return [e for _, e in scored[:limit]]
 
+    @staticmethod
+    def _score_minzdrav(q: str, e: "MinzdravEntry") -> float:
+        """Общая формула релевантности — вынесена отдельно, чтобы search_minzdrav
+        (список для ручного автокомплита) и best_minzdrav_match_scored (авто-подстановка
+        кода по полю "Наименование услуги", см. routers/dictionaries.py GET /minzdrav/suggest)
+        считали её одинаково: иначе поле "уже выбрано автоматически" и список ручного
+        поиска могли бы по-разному ранжировать один и тот же текст."""
+        name_n = _normalize(e.name)
+        if q == e.code.lower():
+            return 2.0
+        if q in name_n:
+            return 1.0 if name_n.startswith(q) else 0.75
+        if name_n and name_n in q:
+            # название услуги в заявке часто ДЛИННЕЕ канонического имени Минздрава
+            # (например, "Приём врача-офтальмолога первичный" содержит "Офтальмометрия" не будет,
+            # но "Офтальмометрия" может быть подстрокой более длинного пользовательского ввода) —
+            # без этой ветки такие совпадения находил бы только медленный SequenceMatcher.
+            return 0.7
+        return SequenceMatcher(None, q, name_n).ratio()
+
     def search_minzdrav(self, query: str, limit: int = 20, active_only: bool = True) -> list[MinzdravEntry]:
         q = _normalize(query)
         pool = [e for e in self.minzdrav if (e.active or not active_only)]
@@ -149,16 +169,9 @@ class DictionaryStore:
             return pool[:limit]
         scored = []
         for e in pool:
-            name_n = _normalize(e.name)
-            if q == e.code.lower():
-                scored.append((2.0, e))
+            score = self._score_minzdrav(q, e)
+            if score < 0.4:
                 continue
-            if q in name_n:
-                score = 1.0 if name_n.startswith(q) else 0.75
-            else:
-                score = SequenceMatcher(None, q, name_n).ratio()
-                if score < 0.4:
-                    continue
             scored.append((score, e))
         scored.sort(key=lambda t: t[0], reverse=True)
         return [e for _, e in scored[:limit]]
@@ -166,6 +179,50 @@ class DictionaryStore:
     def best_minzdrav_match(self, service_name: str) -> MinzdravEntry | None:
         results = self.search_minzdrav(service_name, limit=1)
         return results[0] if results else None
+
+    def best_minzdrav_match_scored(self, service_name: str, min_score: float = 0.7) -> tuple[float, "MinzdravEntry"] | None:
+        """Для автоматической подстановки кода Минздрава по мере ввода поля
+        "Наименование услуги" (без клика по выпадающему списку, см. app.js
+        _doMinzdravAutoSuggest).
+
+        ВАЖНО: сознательно НЕ использует SequenceMatcher-фоллбэк из _score_minzdrav —
+        только дешёвую проверку подстрокой. Две причины, обе найдены при живой
+        проверке формы (см. ТЗ.md, раздел 12.9), не только в теории:
+        1) Производительность: полный SequenceMatcher.ratio() по ~11000 записям
+           справочника Минздрава занимает ~0.5-0.6с. Это уже терпимо для ОДНОГО
+           запроса при клике "искать", но при автоподсказке НА КАЖДЫЙ debounce
+           (то есть почти на каждое слово при вводе) плюс параллельный запрос
+           обычного автокомплита (search_minzdrav, тот же скан) — два таких скана
+           одновременно конкурируют за GIL и почти удваивают время ответа обоих
+           (~1.2с вместо ~0.6с, воспроизведено и замерено через curl). Заметно
+           тормозит форму при вводе.
+        2) Корректность важнее полноты здесь: авто-подстановка происходит БЕЗ
+           подтверждения пользователя, поэтому нечёткое (fuzzy) совпадение —
+           это риск подставить похожий, но неверный код. Настоящий fuzzy-поиск
+           остаётся в search_minzdrav — там результат виден в списке, и человек
+           выбирает сам.
+        """
+        q = _normalize(service_name)
+        if not q:
+            return None
+        best: tuple[float, MinzdravEntry] | None = None
+        for e in self.minzdrav:
+            if not e.active:
+                continue
+            name_n = _normalize(e.name)
+            if q == e.code.lower():
+                score = 2.0
+            elif q in name_n:
+                score = 1.0 if name_n.startswith(q) else 0.85
+            elif name_n and name_n in q:
+                score = 0.75
+            else:
+                continue  # без SequenceMatcher — см. пояснение выше
+            if best is None or score > best[0]:
+                best = (score, e)
+        if best and best[0] >= min_score:
+            return best
+        return None
 
 
 store = DictionaryStore()

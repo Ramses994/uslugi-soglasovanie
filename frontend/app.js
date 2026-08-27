@@ -5,6 +5,32 @@ const API_BASE = ""; // фронтенд раздаётся тем же FastAPI-
 // Если фронтенд разворачивается отдельно (Nginx/CDN) — укажите здесь адрес бэкенда,
 // например: const API_BASE = "https://price-form.clinic.local";
 
+// FastAPI при 422 (ошибка валидации pydantic) отдаёт body.detail как МАССИВ
+// объектов {loc, msg, type} — не строку. `new Error(arrayOfObjects)` в JS
+// приводит массив к строке через Array.prototype.toString(), а каждый объект
+// внутри — через Object.prototype.toString(), что даёт буквально
+// "[object Object],[object Object]" в интерфейсе (воспроизведено и найдено
+// при реальной проверке формы, см. ТЗ.md). Превращаем detail в читаемый текст
+// независимо от того, строка это, список ошибок валидации или что-то ещё.
+function formatApiErrorDetail(detail) {
+  if (!detail) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const field = Array.isArray(item.loc) ? item.loc.filter((p) => p !== "body").join(".") : "";
+          return field ? `${field}: ${item.msg}` : (item.msg || JSON.stringify(item));
+        }
+        return String(item);
+      })
+      .join("; ");
+  }
+  if (typeof detail === "object") return JSON.stringify(detail);
+  return String(detail);
+}
+
 async function api(path, options = {}) {
   const res = await fetch(API_BASE + path, {
     credentials: "include",
@@ -13,7 +39,7 @@ async function api(path, options = {}) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `Ошибка запроса: ${res.status}`);
+    throw new Error(formatApiErrorDetail(body.detail) || `Ошибка запроса: ${res.status}`);
   }
   // 204 No Content (например, DELETE) — тела нет, res.json() упал бы на пустой строке.
   if (res.status === 204) return null;
@@ -52,7 +78,20 @@ function app() {
     user: null,
     loading: false,
     loginForm: { login: "", password: "" },
-    loginError: "",
+
+    // ---- всплывающее окно ошибок/системных сообщений ----
+    // Раньше ошибки выводились инлайн-текстом под формой (loginError/submitError/
+    // adminError) — легко было проскроллить мимо, а массив ошибок валидации FastAPI
+    // рендерился как "[object Object],[object Object]" (см. formatApiErrorDetail
+    // выше). Теперь единая точка показа — модальное окно поверх интерфейса.
+    notice: { open: false, kind: "error", title: "", lines: [] },
+    notify(kind, title, message) {
+      const lines = Array.isArray(message) ? message : String(message || "").split("; ").filter(Boolean);
+      this.notice = { open: true, kind, title, lines: lines.length ? lines : [String(message || "")] };
+    },
+    closeNotice() {
+      this.notice.open = false;
+    },
 
     form: emptyForm(),
     branches: [],
@@ -79,6 +118,7 @@ function app() {
     minzdravQuery: "",
     minzdravResults: [],
     _minzdravTimer: null,
+    _minzdravAutoTimer: null,
 
     erluQuery: "",
     erluResults: [],
@@ -86,7 +126,6 @@ function app() {
 
     submitted: false,
     submittedId: null,
-    submitError: "",
 
     // ---- вкладка «Мои заявки» ----
     activeTab: "new", // 'new' | 'my' | 'admin'
@@ -100,7 +139,11 @@ function app() {
     adminBranches: [],
     newApprover: { id: "", name: "", email: "", role: "" },
     newBranch: { id: "", name: "" },
-    adminError: "",
+
+    // ---- подбор согласующего из корпоративного каталога (AD) ----
+    directoryQuery: "",
+    directoryResults: [],
+    _directoryTimer: null,
 
     // ---- инициализация ----
     async init() {
@@ -161,48 +204,46 @@ function app() {
 
     // ---- администрирование (согласующие/филиалы) ----
     async loadAdmin() {
-      this.adminError = "";
       try {
         [this.adminApprovers, this.adminBranches] = await Promise.all([
           api("/api/admin/approvers"),
           api("/api/admin/branches"),
         ]);
       } catch (e) {
-        this.adminError = e.message;
+        this.notify("error", "Не удалось загрузить справочники", e.message);
       }
     },
 
     async addApprover() {
-      this.adminError = "";
       if (!this.newApprover.id || !this.newApprover.name || !this.newApprover.email || !this.newApprover.role) {
-        this.adminError = "Заполните все поля согласующего.";
+        this.notify("error", "Не все поля заполнены", "Заполните id, ФИО, email и роль согласующего.");
         return;
       }
       try {
         await api("/api/admin/approvers", { method: "POST", body: JSON.stringify({ ...this.newApprover, required_for: ["all"] }) });
         this.newApprover = { id: "", name: "", email: "", role: "" };
+        this.directoryQuery = "";
+        this.directoryResults = [];
         await this.loadAdmin();
         await this.loadReferences(); // обновить список согласующих в форме «Новая заявка»
       } catch (e) {
-        this.adminError = e.message;
+        this.notify("error", "Не удалось добавить согласующего", e.message);
       }
     },
 
     async deleteApprover(id) {
-      this.adminError = "";
       try {
         await api(`/api/admin/approvers/${id}`, { method: "DELETE" });
         await this.loadAdmin();
         await this.loadReferences();
       } catch (e) {
-        this.adminError = e.message;
+        this.notify("error", "Не удалось удалить согласующего", e.message);
       }
     },
 
     async addBranch() {
-      this.adminError = "";
       if (!this.newBranch.id || !this.newBranch.name) {
-        this.adminError = "Заполните id и название филиала.";
+        this.notify("error", "Не все поля заполнены", "Заполните id и название филиала.");
         return;
       }
       try {
@@ -211,19 +252,43 @@ function app() {
         await this.loadAdmin();
         await this.loadReferences();
       } catch (e) {
-        this.adminError = e.message;
+        this.notify("error", "Не удалось добавить филиал", e.message);
       }
     },
 
     async deleteBranch(id) {
-      this.adminError = "";
       try {
         await api(`/api/admin/branches/${id}`, { method: "DELETE" });
         await this.loadAdmin();
         await this.loadReferences();
       } catch (e) {
-        this.adminError = e.message;
+        this.notify("error", "Не удалось удалить филиал", e.message);
       }
+    },
+
+    // ---- подбор согласующего из корпоративного каталога (AD) ----
+    // В mock-режиме ищет по фиксированному демо-набору (см. ldap_auth._mock_search_directory);
+    // в боевом — по реальному AD под сервисной учёткой, см. ldap_auth.search_directory.
+    searchDirectory() {
+      clearTimeout(this._directoryTimer);
+      this._directoryTimer = setTimeout(() => this._doDirectorySearch(this.directoryQuery), 300);
+    },
+    async _doDirectorySearch(q) {
+      if (!q || q.length < 2) { this.directoryResults = []; return; }
+      try {
+        this.directoryResults = await api(`/api/admin/directory/search?q=${encodeURIComponent(q)}&limit=10`);
+      } catch (e) {
+        this.directoryResults = [];
+        this.notify("error", "Поиск по каталогу AD", e.message);
+      }
+    },
+    pickDirectoryUser(u) {
+      this.newApprover.name = u.name;
+      this.newApprover.email = u.email;
+      if (!this.newApprover.role) this.newApprover.role = u.position || "";
+      if (!this.newApprover.id) this.newApprover.id = (u.login || u.email.split("@")[0] || "").toLowerCase();
+      this.directoryResults = [];
+      this.directoryQuery = "";
     },
 
     async loadReferences() {
@@ -235,12 +300,11 @@ function app() {
 
     async login() {
       this.loading = true;
-      this.loginError = "";
       try {
         this.user = await api("/api/auth/login", { method: "POST", body: JSON.stringify(this.loginForm) });
         await this.loadReferences();
       } catch (e) {
-        this.loginError = e.message;
+        this.notify("error", "Не удалось войти", e.message);
       } finally {
         this.loading = false;
       }
@@ -293,6 +357,38 @@ function app() {
       this.minzdravQuery = "";
     },
 
+    // ---- авто-подстановка кода Минздрава по мере ввода "Наименование услуги" ----
+    // Отдельно от debouncedMinzdravSearch() выше: тот только наполняет выпадающий
+    // список для РУЧНОГО выбора, а это — фоновая подсказка, которая сама
+    // проставляет form.minzdrav, если бэкенд достаточно уверен в совпадении
+    // (см. GET /api/dictionaries/minzdrav/suggest, порог — DictionaryStore.
+    // best_minzdrav_match_scored). Не перезаписывает выбор, который пользователь
+    // сделал вручную (manual_override=true) или явно отклонил крестиком.
+    _minzdravDismissed: false,
+    debouncedMinzdravAutoSuggest() {
+      clearTimeout(this._minzdravAutoTimer);
+      this._minzdravDismissed = false; // новый текст — пользователь ещё не успел отклонить именно его
+      this._minzdravAutoTimer = setTimeout(() => this._doMinzdravAutoSuggest(this.form.name), 400);
+    },
+    async _doMinzdravAutoSuggest(name) {
+      if (!name || name.trim().length < 4) return;
+      if (this.form.minzdrav && this.form.minzdrav.manual_override) return;
+      if (this._minzdravDismissed) return;
+      try {
+        const match = await api(`/api/dictionaries/minzdrav/suggest?name=${encodeURIComponent(name)}`);
+        if (match && !(this.form.minzdrav && this.form.minzdrav.manual_override) && !this._minzdravDismissed) {
+          this.form.minzdrav = { code: match.code, name: match.name, manual_override: false, match_score: match.score };
+        }
+      } catch {
+        // фоновая подсказка необязательна для отправки заявки — молча пропускаем сбой,
+        // не мешаем пользователю всплывающим окном из-за необязательной функции
+      }
+    },
+    dismissMinzdravSuggestion() {
+      this._minzdravDismissed = true;
+      this.form.minzdrav = null;
+    },
+
     // ---- автокомплит ЕРЛУ-КДЛ ----
     searchErlu() {
       clearTimeout(this._erluTimer);
@@ -318,13 +414,12 @@ function app() {
 
     // ---- отправка ----
     async submitRequest() {
-      this.submitError = "";
       if (!this.form.prices.length) {
-        this.submitError = "Укажите хотя бы одну цену по филиалу.";
+        this.notify("error", "Не хватает данных", "Укажите хотя бы одну цену по филиалу.");
         return;
       }
       if (!this.form.approver_ids.length) {
-        this.submitError = "Выберите хотя бы одного согласующего.";
+        this.notify("error", "Не хватает данных", "Выберите хотя бы одного согласующего.");
         return;
       }
       this.loading = true;
@@ -335,7 +430,7 @@ function app() {
         this.submitted = true;
         this.submittedId = res.id;
       } catch (e) {
-        this.submitError = e.message;
+        this.notify("error", "Не удалось отправить заявку", e.message);
       } finally {
         this.loading = false;
       }

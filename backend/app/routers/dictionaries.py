@@ -36,6 +36,23 @@ def search_minzdrav(q: str = Query("", description="Строка поиска п
     return [{"code": e.code, "name": e.name, "active": e.active} for e in results]
 
 
+@router.get("/minzdrav/suggest")
+def suggest_minzdrav(name: str = Query("", description="Текст поля «Наименование услуги» — для авто-подстановки кода"),
+                      user=Depends(get_current_user)):
+    """Фоновая авто-подсказка кода Минздрава по мере ввода наименования услуги —
+    в отличие от /minzdrav (обычный поиск для ручного автокомплита), тут порог
+    строже и в ответе только один лучший кандидат: подставлять код без участия
+    пользователя можно только при уверенном совпадении, см. min_score в
+    DictionaryStore.best_minzdrav_match_scored."""
+    if not name or len(name.strip()) < 4:
+        return None
+    match = store.best_minzdrav_match_scored(name)
+    if not match:
+        return None
+    score, entry = match
+    return {"code": entry.code, "name": entry.name, "score": round(score, 3)}
+
+
 @router.get("/branches")
 def branches(user=Depends(get_current_user)):
     # Имена филиалов читаются из branches.json (редактируется через роль

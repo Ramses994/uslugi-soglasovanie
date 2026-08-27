@@ -26,6 +26,29 @@
 
 <div x-data="app()" x-init="init()" x-cloak>
 
+  <!-- ============ ВСПЛЫВАЮЩЕЕ ОКНО ОШИБОК/СИСТЕМНЫХ СООБЩЕНИЙ ============ -->
+  <!-- Единая точка показа: notify(kind, title, message) в app.js. Работает и до,
+       и после логина (стоит вне x-if="!user"/x-if="user"), поэтому ошибки входа
+       тоже выводятся сюда, а не отдельным инлайн-текстом. -->
+  <div x-show="notice.open" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4"
+       @keydown.escape.window="closeNotice()">
+    <div class="card w-full max-w-sm" @click.outside="closeNotice()">
+      <div class="flex items-start gap-3 mb-4">
+        <div class="text-2xl leading-none" x-text="notice.kind === 'error' ? '⚠️' : (notice.kind === 'success' ? '✅' : 'ℹ️')"></div>
+        <div class="flex-1 min-w-0">
+          <div class="font-semibold" :class="notice.kind === 'error' ? 'text-red-700' : 'text-slate-900'" x-text="notice.title"></div>
+          <ul class="text-sm text-slate-600 mt-1.5 space-y-1 list-disc list-inside">
+            <template x-for="(line, idx) in notice.lines" :key="idx">
+              <li x-text="line"></li>
+            </template>
+          </ul>
+        </div>
+      </div>
+      <button type="button" class="btn-secondary w-full justify-center" @click="closeNotice()">Закрыть</button>
+    </div>
+  </div>
+
   <!-- ============ ЭКРАН ЛОГИНА ============ -->
   <template x-if="!user">
     <div class="min-h-screen flex items-center justify-center px-4">
@@ -44,7 +67,6 @@
             <span x-show="!loading">Войти</span>
             <span x-show="loading">Проверка…</span>
           </button>
-          <p x-show="loginError" x-text="loginError" class="text-red-600 text-xs mt-3"></p>
         </form>
       </div>
     </div>
@@ -187,6 +209,23 @@
 
             <div class="border-t border-slate-100 pt-4">
               <p class="text-xs font-medium text-slate-500 mb-2">Добавить согласующего</p>
+
+              <div class="mb-3 relative">
+                <label class="field-label">Найти в корпоративном каталоге (AD)</label>
+                <input class="input" x-model="directoryQuery" @input="searchDirectory()"
+                       placeholder="ФИО, логин или email — например, dmartynov или Мартынов">
+                <div x-show="directoryResults.length" class="absolute z-20 bg-white border border-slate-200 rounded-lg mt-1 w-full max-h-56 overflow-auto shadow-lg">
+                  <template x-for="u in directoryResults" :key="u.login + u.email">
+                    <button type="button" class="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-slate-50"
+                            @click="pickDirectoryUser(u)">
+                      <div class="font-medium text-slate-800" x-text="u.name"></div>
+                      <div class="text-xs text-slate-500" x-text="[u.position, u.department, u.email].filter(Boolean).join(' · ')"></div>
+                    </button>
+                  </template>
+                </div>
+                <p class="text-xs text-slate-400 mt-1">Выбор из каталога заполнит ФИО и email ниже — их и роль можно поправить вручную перед добавлением.</p>
+              </div>
+
               <div class="grid sm:grid-cols-2 gap-2 mb-2">
                 <input class="input" placeholder="id (латиницей, уникальный)" x-model="newApprover.id">
                 <input class="input" placeholder="ФИО" x-model="newApprover.name">
@@ -226,7 +265,6 @@
             </div>
           </div>
 
-          <p x-show="adminError" x-text="adminError" class="text-red-600 text-sm"></p>
         </div>
 
         <!-- ============ ВКЛАДКА «НОВАЯ ЗАЯВКА» ============ -->
@@ -269,8 +307,11 @@
 
             <div class="mb-4">
               <label class="field-label">Наименование услуги (как будет отображаться в МИС) *</label>
-              <input class="input" x-model="form.name" @input="debouncedMinzdravSearch()" required maxlength="255"
+              <input class="input" x-model="form.name"
+                     @input="debouncedMinzdravAutoSuggest()"
+                     required maxlength="255"
                      placeholder="Например: Приём врача-терапевта повторный">
+              <p class="text-xs text-slate-400 mt-1">Код Минздрава ниже подбирается автоматически по этому названию — при уверенном совпадении подставится сам, его можно снять крестиком или заменить вручную через поиск.</p>
             </div>
 
             <div class="grid sm:grid-cols-2 gap-4 mb-4">
@@ -312,8 +353,14 @@
                 </template>
               </div>
               <template x-if="form.minzdrav">
-                <div class="mt-2"><span class="chip">✓ <span x-text="form.minzdrav.code"></span> — <span x-text="form.minzdrav.name"></span>
-                  <button type="button" class="ml-1 text-blue-500" @click="form.minzdrav = null">✕</button></span></div>
+                <div class="mt-2">
+                  <span class="chip">
+                    <span x-text="form.minzdrav.manual_override ? '✓' : '≈'"></span>
+                    <span x-text="form.minzdrav.code"></span> — <span x-text="form.minzdrav.name"></span>
+                    <span x-show="!form.minzdrav.manual_override" class="text-blue-400">(подобрано автоматически)</span>
+                    <button type="button" class="ml-1 text-blue-500" @click="dismissMinzdravSuggestion()">✕</button>
+                  </span>
+                </div>
               </template>
             </div>
           </div>
@@ -532,7 +579,6 @@
               <span x-show="loading">Отправка…</span>
             </button>
           </div>
-          <p x-show="submitError" x-text="submitError" class="text-red-600 text-sm"></p>
         </form>
         </div>
         <!-- /вкладка «Новая заявка» -->

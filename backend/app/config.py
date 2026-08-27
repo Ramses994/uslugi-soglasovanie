@@ -61,11 +61,33 @@ class Settings(BaseSettings):
     # LDAP
     ldap_mock: bool = True
     ldap_server: str = "ldap://dc01.clinic.local"
-    ldap_domain: str = "CLINIC"
+    ldap_domain: str = "CLINIC"  # NetBIOS-имя домена (для формата DOMAIN\\login)
+    # Суффикс UPN для построения "login@suffix" из голого логина без домена —
+    # РАНЬШЕ это было захардкожено как f"{ldap_domain}.local", что ломается на
+    # любом боевом AD, чей DNS-домен не заканчивается на .local (например,
+    # medkvadrat.ru). Обычно совпадает с DNS-именем домена AD, но если в AD
+    # настроен отдельный альтернативный суффикс UPN — укажите именно его.
+    ldap_upn_suffix: str = "clinic.local"
+    # Принудительно использовать LDAPS (порт 636) даже если ldap_server начинается
+    # с "ldap://". Многие AD, начиная примерно с Server 2019/патчей 2020+, по
+    # умолчанию требуют LDAP signing/channel binding для simple bind — обычный
+    # незашифрованный bind по ldap:// в таком случае отклоняется как "неверные
+    # учётные данные" ДАЖЕ ПРИ ПРАВИЛЬНОМ ПАРОЛЕ, что легко спутать с опечаткой в
+    # пароле. Самый надёжный вариант — использовать ldap_server=ldaps://... (тогда
+    # схема детектируется автоматически) или явно выставить этот флаг.
+    ldap_use_ssl: bool = False
     ldap_base_dn: str = "DC=clinic,DC=local"
     ldap_user_search_base: str = "OU=Users,DC=clinic,DC=local"
+    # Сервисная read-only учётка — нужна не только как fallback при чтении
+    # атрибутов (см. ldap_auth.authenticate), но и для поиска по каталогу
+    # (подбор согласующих на вкладке «Администрирование», см. ldap_auth.search_directory) —
+    # без неё поиск по каталогу в боевом режиме недоступен.
     ldap_service_user: str = ""
     ldap_service_password: str = ""
+    # Ограничить поиск по каталогу учётками с почтой в этом домене (например,
+    # "@medkvadrat.ru"), чтобы не показывать в подборе согласующих служебные/
+    # системные учётки без корпоративной почты. Пусто — не фильтровать.
+    ldap_directory_mail_suffix: str = ""
 
     # SMTP
     smtp_host: str = "localhost"

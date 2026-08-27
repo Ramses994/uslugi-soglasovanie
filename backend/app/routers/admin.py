@@ -6,9 +6,10 @@ Depends(require_admin) — обычный сотрудник получит 403.
 Роль назначается через список логинов в .env (FORM_ADMIN_LOGINS) — см.
 config.Settings.admin_logins() и комментарий там же про AD-группу для прода.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from ..auth.ldap_auth import search_directory, LdapAuthError
 from ..config import get_settings
 from ..services import admin_store
 from .auth import require_admin
@@ -28,6 +29,25 @@ class ApproverIn(BaseModel):
 class BranchIn(BaseModel):
     id: str
     name: str
+
+
+# ---------------------------------------------------------------------------
+# Поиск по корпоративному каталогу (AD) — для подбора согласующих без ручного
+# набора email. В боевом режиме ходит в AD под сервисной учёткой (см.
+# ldap_auth.search_directory), в LDAP_MOCK — по фиксированному демо-набору.
+# ---------------------------------------------------------------------------
+
+@router.get("/directory/search")
+def search_corporate_directory(q: str = Query("", description="Часть ФИО, логина или email"),
+                                limit: int = 15, user=Depends(require_admin)):
+    try:
+        results = search_directory(q, limit=limit)
+    except LdapAuthError as exc:
+        raise HTTPException(400, str(exc))
+    return [
+        {"login": u.login, "name": u.display_name, "email": u.email, "department": u.department, "position": u.position}
+        for u in results
+    ]
 
 
 # ---------------------------------------------------------------------------
