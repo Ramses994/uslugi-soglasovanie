@@ -386,7 +386,7 @@
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <template x-for="rt in requestTypes" :key="rt.value">
                 <button type="button"
-                        @click="setRequestType(rt.value)"
+                        @click="form.request_type = rt.value"
                         :class="form.request_type === rt.value ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
                         class="rounded-lg border px-3 py-2 text-sm font-medium text-left transition">
                   <span x-text="rt.label"></span>
@@ -696,6 +696,6 @@
   </template>
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

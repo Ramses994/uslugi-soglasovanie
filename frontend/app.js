@@ -152,6 +152,11 @@ function app() {
 
     // ---- инициализация ----
     async init() {
+      this.$watch("form.request_type", (value) => {
+        if (value !== "delete") {
+          this.form.mis_code = "";
+        }
+      });
       try {
         this.user = await api("/api/auth/me");
         await this.loadReferences();
@@ -191,13 +196,6 @@ function app() {
     requestTypeLabel(value) {
       const found = this.requestTypes.find((x) => x.value === value);
       return found ? found.label : (value || "");
-    },
-
-    setRequestType(type) {
-      this.form.request_type = type;
-      if (type !== "delete") {
-        this.form.mis_code = "";
-      }
     },
 
     canEditRequest(r) {
