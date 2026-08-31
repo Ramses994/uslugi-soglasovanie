@@ -366,6 +366,20 @@ class TestValidationErrorFormat:
         r = logged_in_client.post("/api/requests", json=payload)
         assert r.status_code == 422
 
+    def test_delete_without_mis_code_is_422(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "delete", "mis_code": None}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+        assert "МИС" in r.text or "mis_code" in r.text.lower() or "удален" in r.text.lower()
+
+    def test_delete_with_mis_code_is_201(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "delete", "mis_code": "01.01.001"}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text
+        detail = logged_in_client.get(f"/api/requests/{r.json()['id']}").json()
+        assert detail["request_type"] == "delete"
+        assert detail["payload"]["mis_code"] == "01.01.001"
+
 
 # ---------------------------------------------------------------------------
 # RBAC списка/карточки заявок, фильтры, DELETE/PATCH, код МИС в экспорте

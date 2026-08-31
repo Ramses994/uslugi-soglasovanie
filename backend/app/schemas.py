@@ -167,6 +167,8 @@ class ServiceRequestIn(BaseModel):
         desc = (self.business.description if self.business else None) or ""
         if not str(desc).strip():
             raise ValueError("Укажите деловое обоснование (суть услуги)")
+        if self.request_type == "delete" and not (self.mis_code and str(self.mis_code).strip()):
+            raise ValueError("Код услуги в МИС Медиалог обязателен при удалении услуги")
         return self
 
 

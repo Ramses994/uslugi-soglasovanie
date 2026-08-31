@@ -386,7 +386,7 @@
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <template x-for="rt in requestTypes" :key="rt.value">
                 <button type="button"
-                        @click="form.request_type = rt.value"
+                        @click="setRequestType(rt.value)"
                         :class="form.request_type === rt.value ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
                         class="rounded-lg border px-3 py-2 text-sm font-medium text-left transition">
                   <span x-text="rt.label"></span>
@@ -408,29 +408,29 @@
               <p class="text-xs text-slate-400 mt-1">Код Минздрава ниже подбирается автоматически по этому названию — при уверенном совпадении подставится сам, его можно снять крестиком или заменить вручную через поиск.</p>
             </div>
 
-            <div class="mb-4">
-              <label class="field-label">Код услуги в МИС Медиалог <span class="text-slate-400 font-normal">(опционально)</span></label>
-              <input class="input" x-model="form.mis_code" maxlength="64" placeholder="Например: 01.01.001">
-              <p class="text-xs text-slate-400 mt-1">Попадёт в колонку CODE файла импорта после согласования. Если не указан — код задаёт администратор МИС при импорте.</p>
+            <div class="mb-4" x-show="form.request_type === 'delete'" x-cloak>
+              <label class="field-label">Код услуги в МИС Медиалог *</label>
+              <input class="input" x-model="form.mis_code" maxlength="64" placeholder="Например: 01.01.001"
+                     :required="form.request_type === 'delete'">
+              <p class="text-xs text-slate-400 mt-1">Обязательно для удаления услуги — код должен точно совпадать с действующей услугой в МИС.</p>
             </div>
 
-            <div class="grid sm:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label class="field-label">Тип услуги *</label>
-                <select class="input" x-model="form.service_type" required>
-                  <template x-for="t in serviceTypes" :key="t.value">
-                    <option :value="t.value" x-text="t.label"></option>
-                  </template>
-                </select>
-              </div>
-              <div>
-                <label class="field-label">Прейскурант</label>
-                <select class="input" x-model="form.price_list">
-                  <option value="both">ОМС и ДМС</option>
-                  <option value="dms">ДМС</option>
-                  <option value="oms">ОМС</option>
-                </select>
-              </div>
+            <div class="mb-4">
+              <label class="field-label">Тип услуги *</label>
+              <select class="input" x-model="form.service_type" required>
+                <template x-for="t in serviceTypes" :key="t.value">
+                  <option :value="t.value" x-text="t.label"></option>
+                </template>
+              </select>
+            </div>
+            <!-- Прейскурант временно скрыт; значение both уходит с формы по умолчанию. Вернуть — убрать x-show="false". -->
+            <div x-show="false" style="display: none;" aria-hidden="true">
+              <label class="field-label">Прейскурант</label>
+              <select class="input" x-model="form.price_list">
+                <option value="both">ОМС и ДМС</option>
+                <option value="dms">ДМС</option>
+                <option value="oms">ОМС</option>
+              </select>
             </div>
 
             <!-- Признак лаборатории -->

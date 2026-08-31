@@ -193,6 +193,13 @@ function app() {
       return found ? found.label : (value || "");
     },
 
+    setRequestType(type) {
+      this.form.request_type = type;
+      if (type !== "delete") {
+        this.form.mis_code = "";
+      }
+    },
+
     canEditRequest(r) {
       if (!this.user || !r) return false;
       if (this.user.is_admin) return true;
@@ -542,6 +549,10 @@ function app() {
       if (!(this.form.business && (this.form.business.description || "").trim())) {
         this.notify("error", "Не хватает данных", "Укажите деловое обоснование (суть услуги).");
         this.showBusiness = true;
+        return;
+      }
+      if (this.form.request_type === "delete" && !(this.form.mis_code || "").trim()) {
+        this.notify("error", "Не хватает данных", "Укажите код услуги в МИС Медиалог — он обязателен при удалении услуги.");
         return;
       }
       this.loading = true;
