@@ -43,3 +43,15 @@ def ensure_schema() -> None:
             conn.execute(text(
                 "ALTER TABLE service_requests ADD COLUMN submission_comment TEXT"
             ))
+        if "approval_chain" not in cols:
+            conn.execute(text(
+                "ALTER TABLE service_requests ADD COLUMN approval_chain JSON"
+            ))
+        if "current_stage_index" not in cols:
+            conn.execute(text(
+                "ALTER TABLE service_requests ADD COLUMN current_stage_index INTEGER NOT NULL DEFAULT 0"
+            ))
+        if "mis_notified_at" not in cols:
+            conn.execute(text(
+                "ALTER TABLE service_requests ADD COLUMN mis_notified_at DATETIME"
+            ))

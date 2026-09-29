@@ -23,8 +23,27 @@
             <tr><td style="border:1px solid #e4e8ee;"><b>Тип услуги</b></td><td style="border:1px solid #e4e8ee;">{{ service_type_label }}</td></tr>
             <tr style="background:#f7f9fc;"><td style="border:1px solid #e4e8ee;"><b>Цены по филиалам</b></td>
               <td style="border:1px solid #e4e8ee;">
-                {% for p in data.prices %}{{ p.branch }}: <b>{{ "%.2f"|format(p.price) }} ₽</b>{% if not loop.last %}<br>{% endif %}{% endfor %}
+                {% if price_undefined or (data.price_undefined is defined and data.price_undefined) %}
+                  Цена не определена — установит маркетинг на первом этапе.
+                {% else %}
+                  {% for p in data.prices %}{{ p.branch }}: <b>{{ "%.2f"|format(p.price) }} ₽</b>{% if not loop.last %}<br>{% endif %}{% endfor %}
+                {% endif %}
               </td></tr>
+            {% if data.change_description %}
+            <tr><td style="border:1px solid #e4e8ee;"><b>Что меняется</b></td><td style="border:1px solid #e4e8ee;">{{ data.change_description }}</td></tr>
+            {% endif %}
+            {% if data.simple_justification %}
+            <tr style="background:#f7f9fc;"><td style="border:1px solid #e4e8ee;"><b>Обоснование</b></td><td style="border:1px solid #e4e8ee;">{{ data.simple_justification }}</td></tr>
+            {% endif %}
+            {% if data.affected_branches %}
+            <tr><td style="border:1px solid #e4e8ee;"><b>Филиалы</b></td><td style="border:1px solid #e4e8ee;">{{ data.affected_branches | join(", ") }}</td></tr>
+            {% endif %}
+            {% if data.included_services %}
+            <tr style="background:#f7f9fc;"><td style="border:1px solid #e4e8ee;"><b>Состав комплекса</b></td>
+              <td style="border:1px solid #e4e8ee;">
+                {% for s in data.included_services %}{{ s.name }}{% if s.code %} ({{ s.code }}){% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}
+              </td></tr>
+            {% endif %}
             {% if data.short_name %}<tr><td style="border:1px solid #e4e8ee;">Сокр. наименование</td><td style="border:1px solid #e4e8ee;">{{ data.short_name }}</td></tr>{% endif %}
             {% if data.description %}<tr style="background:#f7f9fc;"><td style="border:1px solid #e4e8ee;">Описание</td><td style="border:1px solid #e4e8ee;">{{ data.description }}</td></tr>{% endif %}
             {% if data.sex_limit and data.sex_limit != "all" %}<tr><td style="border:1px solid #e4e8ee;">Ограничение по полу</td><td style="border:1px solid #e4e8ee;">{{ data.sex_limit }}</td></tr>{% endif %}

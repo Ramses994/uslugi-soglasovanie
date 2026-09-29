@@ -23,9 +23,20 @@ from conftest import SAMPLE_REQUEST_PAYLOAD  # noqa: E402
 
 
 def _extract_action_url(html: str, action: str) -> str:
-    m = re.search(rf'href="([^"]*?/api/approvals/[^"]+?/{action})"', html)
+    m = re.search(rf'href="([^"]*?/api/approvals/[^"/]+/{action})"', html)
     assert m, f"Не нашли ссылку '{action}' в письме:\n{html[:500]}"
     return m.group(1)
+
+
+def _html_to(sent_emails: list[dict], recipient: str, last: bool = True) -> str:
+    matches = [m for m in sent_emails if recipient in m["to"]]
+    assert matches, f"Нет письма для {recipient}"
+    return (matches[-1] if last else matches[0])["html_body"]
+
+
+def _approve_as(client, recipient: str):
+    url = _extract_action_url(_html_to(client.sent_emails, recipient), "approve")
+    return client.get(url)
 
 
 def _post_decision(client, url: str, comment: str = ""):
@@ -99,26 +110,24 @@ class TestApprovalFlow:
         body = r.json()
         assert body["status"] == "pending"
 
-        assert len(logged_in_client.sent_emails) == 2
+        assert len(logged_in_client.sent_emails) == 1
         recipients = {tuple(m["to"]) for m in logged_in_client.sent_emails}
         assert ("chief.doctor@clinic.local",) in recipients
-        assert ("mis.admin@clinic.local",) in recipients
+        assert ("mis.admin@clinic.local",) not in recipients
 
     def test_full_approval_changes_status_and_generates_import_file(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
         request_id = r.json()["id"]
 
         emails = logged_in_client.sent_emails
-        approve_chief = _extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve")
-        approve_mis = _extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve")
+        approve_chief = _extract_action_url(_html_to(emails, "chief.doctor@clinic.local"), "approve")
 
-        # первое согласование — статус ещё pending, ждём второго
         r1 = logged_in_client.get(approve_chief)
         assert r1.status_code == 200
         status_after_1 = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
         assert status_after_1 == "pending"
 
-        # второе согласование — все согласовали, статус approved + письмо с файлом импорта
+        approve_mis = _extract_action_url(_html_to(logged_in_client.sent_emails, "mis.admin@clinic.local"), "approve")
         r2 = logged_in_client.get(approve_mis)
         assert r2.status_code == 200
         status_after_2 = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
@@ -126,6 +135,10 @@ class TestApprovalFlow:
 
         attachment_mails = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
         assert len(attachment_mails) == 1
+        recips = attachment_mails[0]["to"]
+        assert "mis.admin@clinic.local" in recips
+        assert "ivanov@clinic.local" in recips
+        assert logged_in_client.get(f"/api/requests/{request_id}").json()["mis_notified_at"]
         wb = openpyxl.load_workbook(io.BytesIO(attachment_mails[0]["attachment_bytes"]))
         ws = wb.active
         header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
@@ -139,7 +152,7 @@ class TestApprovalFlow:
     def test_repeat_click_on_same_link_is_idempotent(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
         request_id = r.json()["id"]
-        approve_chief = _extract_action_url(_html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "approve")
+        approve_chief = _extract_action_url(_html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "approve")
 
         logged_in_client.get(approve_chief)
         mails_after_first_click = len(logged_in_client.sent_emails)
@@ -156,7 +169,7 @@ class TestApprovalFlow:
     def test_reject_stops_the_request(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
         request_id = r.json()["id"]
-        reject_chief = _extract_action_url(_html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject")
+        reject_chief = _extract_action_url(_html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject")
 
         r_reject = _post_decision(logged_in_client, reject_chief)
         assert r_reject.status_code == 200
@@ -167,7 +180,7 @@ class TestApprovalFlow:
     def test_reject_get_opens_comment_form_without_changing_status(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
         request_id = r.json()["id"]
-        reject_chief = _extract_action_url(_html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject")
+        reject_chief = _extract_action_url(_html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject")
 
         page = logged_in_client.get(reject_chief)
         assert page.status_code == 200
@@ -178,20 +191,12 @@ class TestApprovalFlow:
     def test_submit_email_has_three_action_links_and_version(self, logged_in_client):
         payload = {**SAMPLE_REQUEST_PAYLOAD, "submission_comment": "Просим согласовать до пятницы"}
         logged_in_client.post("/api/requests", json=payload)
-        html = _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local")
+        html = _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local")
         _extract_action_url(html, "approve")
         _extract_action_url(html, "reject")
         _extract_action_url(html, "rework")
         assert "версия 1" in html.lower()
         assert "Просим согласовать до пятницы" in html
-
-
-def _html_of(sent_emails: list[dict], recipient: str) -> str:
-    """Находит письмо, адресованное recipient, и возвращает его HTML-тело
-    (conftest.py::fake_send / fake_send_with_attachment сохраняют его как есть,
-    без реальной отправки — см. docstring в conftest.py)."""
-    match = next(m for m in sent_emails if recipient in m["to"])
-    return match["html_body"]
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +344,7 @@ class TestValidationErrorFormat:
         # тут ни при чём (FastAPI и раньше отдавал detail корректно), но полезно
         # зафиксировать форму ответа, на которую опирается formatApiErrorDetail()
         # в app.js, чтобы будущий рефакторинг API не сломал фронтенд молча.
-        bad_payload = {**SAMPLE_REQUEST_PAYLOAD, "prices": []}  # нарушает min_length=1
+        bad_payload = {**SAMPLE_REQUEST_PAYLOAD, "prices": [], "all_branches": False, "price_undefined": False}
         r = logged_in_client.post("/api/requests", json=bad_payload)
         assert r.status_code == 422
         detail = r.json()["detail"]
@@ -373,7 +378,13 @@ class TestValidationErrorFormat:
         assert "МИС" in r.text or "mis_code" in r.text.lower() or "удален" in r.text.lower()
 
     def test_delete_with_mis_code_is_201(self, logged_in_client):
-        payload = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "delete", "mis_code": "01.01.001"}
+        payload = {
+            **SAMPLE_REQUEST_PAYLOAD,
+            "request_type": "delete",
+            "mis_code": "01.01.001",
+            "affected_branches": ["Куркино"],
+            "simple_justification": "Услуга больше не оказывается",
+        }
         r = logged_in_client.post("/api/requests", json=payload)
         assert r.status_code == 201, r.text
         detail = logged_in_client.get(f"/api/requests/{r.json()['id']}").json()
@@ -434,7 +445,7 @@ class TestRequestsRbac:
     def test_employee_can_patch_rejected(self, client):
         client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
         request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
-        reject_url = _extract_action_url(_html_of(client.sent_emails, "chief.doctor@clinic.local"), "reject")
+        reject_url = _extract_action_url(_html_to(client.sent_emails, "chief.doctor@clinic.local"), "reject")
         assert _post_decision(client, reject_url).status_code == 200
         assert client.get(f"/api/requests/{request_id}").json()["status"] == "rework"
 
@@ -493,9 +504,8 @@ class TestSmtpEnvelope:
 class TestApprovalHistoryAndResubmit:
     def test_full_approval_writes_history_rows(self, logged_in_client):
         request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
-        emails = logged_in_client.sent_emails
-        logged_in_client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
-        logged_in_client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        _approve_as(logged_in_client, "mis.admin@clinic.local")
 
         detail = logged_in_client.get(f"/api/requests/{request_id}").json()
         assert detail["status"] == "approved"
@@ -511,7 +521,7 @@ class TestApprovalHistoryAndResubmit:
     def test_rework_sets_status_and_keeps_comment(self, logged_in_client):
         request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
         rework_url = _extract_action_url(
-            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
         )
         form = logged_in_client.get(rework_url)
         assert form.status_code == 200
@@ -528,7 +538,7 @@ class TestApprovalHistoryAndResubmit:
     def test_reject_is_recorded_as_reject_but_status_is_rework(self, logged_in_client):
         request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
         reject_url = _extract_action_url(
-            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject"
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "reject"
         )
         _post_decision(logged_in_client, reject_url, "Недостаточно обоснования")
         detail = logged_in_client.get(f"/api/requests/{request_id}").json()
@@ -546,12 +556,11 @@ class TestApprovalHistoryAndResubmit:
     def test_cannot_decide_after_rework(self, logged_in_client):
         request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
         emails = logged_in_client.sent_emails
-        rework_url = _extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "rework")
-        approve_mis = _extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve")
+        rework_url = _extract_action_url(_html_to(emails, "chief.doctor@clinic.local"), "rework")
         _post_decision(logged_in_client, rework_url)
-        r = logged_in_client.get(approve_mis)
+        r = logged_in_client.get(rework_url)
         assert r.status_code == 200
-        assert "уже не на согласовании" in r.text.lower()
+        assert "уже зафиксировано" in r.text.lower() or "уже не на согласовании" in r.text.lower()
         assert logged_in_client.get(f"/api/requests/{request_id}").json()["status"] == "rework"
 
     def test_resubmit_from_rework_increments_version_and_resends_mail(self, logged_in_client):
@@ -559,7 +568,7 @@ class TestApprovalHistoryAndResubmit:
         request_id = created["id"]
         assert created["version"] == 1
         rework_url = _extract_action_url(
-            _html_of(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
         )
         _post_decision(logged_in_client, rework_url)
         before = len(logged_in_client.sent_emails)
@@ -571,14 +580,14 @@ class TestApprovalHistoryAndResubmit:
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "pending"
         assert r.json()["version"] == 2
-        assert len(logged_in_client.sent_emails) == before + 2
+        assert len(logged_in_client.sent_emails) == before + 1
 
         detail = logged_in_client.get(f"/api/requests/{request_id}").json()
         assert detail["version"] == 2
         assert detail["submission_comment"] == "Цену поправили"
         assert all(a["decision"] is None for a in detail["approvals"])
         assert any(h["decision"] == "resubmit" for h in detail["history"])
-        html = _html_of(logged_in_client.sent_emails[-2:], "chief.doctor@clinic.local")
+        html = _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local")
         assert "версия 2" in html.lower()
         assert "Цену поправили" in html
 
@@ -590,7 +599,7 @@ class TestApprovalHistoryAndResubmit:
     def test_employee_cannot_resubmit_someone_elses_rework(self, client):
         client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
         request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
-        rework_url = _extract_action_url(_html_of(client.sent_emails, "chief.doctor@clinic.local"), "rework")
+        rework_url = _extract_action_url(_html_to(client.sent_emails, "chief.doctor@clinic.local"), "rework")
         _post_decision(client, rework_url)
         client.post("/api/auth/logout")
         client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
@@ -598,9 +607,8 @@ class TestApprovalHistoryAndResubmit:
 
     def test_admin_can_resubmit_approved(self, logged_in_client):
         request_id = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
-        emails = logged_in_client.sent_emails
-        logged_in_client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
-        logged_in_client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        _approve_as(logged_in_client, "mis.admin@clinic.local")
         assert logged_in_client.get(f"/api/requests/{request_id}").json()["status"] == "approved"
 
         r = logged_in_client.post(f"/api/requests/{request_id}/resubmit", json={})
@@ -612,8 +620,274 @@ class TestApprovalHistoryAndResubmit:
         client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
         request_id = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
         emails = client.sent_emails
-        client.get(_extract_action_url(_html_of(emails, "chief.doctor@clinic.local"), "approve"))
-        client.get(_extract_action_url(_html_of(emails, "mis.admin@clinic.local"), "approve"))
+        _approve_as(client, "chief.doctor@clinic.local")
+        _approve_as(client, "mis.admin@clinic.local")
         assert client.get(f"/api/requests/{request_id}").json()["status"] == "approved"
         assert client.post(f"/api/requests/{request_id}/resubmit", json={}).status_code == 403
+
+
+def _add_chain_anchors(client):
+    client.post("/api/admin/approvers", json={
+        "id": "nfolomova", "name": "Фоломова", "email": "nfolomova@clinic.local",
+        "role": "Маркетинг", "required_for": ["all"], "order": 1,
+    })
+    client.post("/api/admin/approvers", json={
+        "id": "osokolovskaya", "name": "Соколовская", "email": "osokolovskaya@clinic.local",
+        "role": "ГД", "required_for": ["all"], "order": 999,
+    })
+
+
+class TestSequentialChain:
+    def test_folomova_first_sokolovskaya_last_even_if_not_selected(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text
+        assert r.json()["approval_chain"] == ["nfolomova", "chief_doctor", "osokolovskaya"]
+        assert len(logged_in_client.sent_emails) == 1
+        assert "nfolomova@clinic.local" in logged_in_client.sent_emails[0]["to"]
+
+    def test_out_of_turn_approve_is_idempotent(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        logged_in_client.post("/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]})
+        rid = logged_in_client.get("/api/requests").json()[0]["id"]
+        from app.security import make_approval_token
+        url = f"/api/approvals/{make_approval_token(rid, 'osokolovskaya')}/approve"
+        page = logged_in_client.get(url)
+        assert page.status_code == 200
+        assert "не ваша очередь" in page.text.lower()
+        assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "pending"
+
+    def test_resubmit_skips_already_approved(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        created = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()
+        rid = created["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        rework_url = _extract_action_url(
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+        )
+        _post_decision(logged_in_client, rework_url, "правьте описание")
+        before = len(logged_in_client.sent_emails)
+        r = logged_in_client.post(f"/api/requests/{rid}/resubmit", json={"submission_comment": "готово"})
+        assert r.status_code == 200, r.text
+        assert len(logged_in_client.sent_emails) == before + 1
+        detail = logged_in_client.get(f"/api/requests/{rid}").json()
+        by_id = {a["approver_id"]: a["decision"] for a in detail["approvals"]}
+        assert by_id["nfolomova"] == "approve"
+        assert by_id["chief_doctor"] is None
+        assert "chief.doctor@clinic.local" in logged_in_client.sent_emails[-1]["to"]
+
+    def test_folomova_price_form_then_next_stage(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        payload = {
+            **SAMPLE_REQUEST_PAYLOAD,
+            "approver_ids": ["chief_doctor"],
+            "price_undefined": True,
+            "prices": [],
+            "all_branches": False,
+        }
+        rid = logged_in_client.post("/api/requests", json=payload).json()["id"]
+        html = _html_to(logged_in_client.sent_emails, "nfolomova@clinic.local")
+        price_url = _extract_action_url(html, "approve-with-price")
+        page = logged_in_client.get(price_url)
+        assert page.status_code == 200
+        assert "<form" in page.text.lower()
+        posted = logged_in_client.post(price_url, data={"price_Куркино": "2500", "price_Каширка": "2500"})
+        assert posted.status_code == 200
+        detail = logged_in_client.get(f"/api/requests/{rid}").json()
+        assert detail["status"] == "pending"
+        assert detail["payload"]["price_undefined"] is False
+        assert detail["payload"]["prices"]
+        assert "chief.doctor@clinic.local" in logged_in_client.sent_emails[-1]["to"]
+
+    def test_full_chain_sends_one_mis_mail(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        before = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert before == []
+        _approve_as(logged_in_client, "osokolovskaya@clinic.local")
+        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert len(attachments) == 1
+        recips = attachments[0]["to"]
+        assert "mis.admin@clinic.local" in recips
+        assert "ivanov@clinic.local" in recips
+        detail = logged_in_client.get(f"/api/requests/{rid}").json()
+        assert detail["status"] == "approved"
+        assert detail["mis_notified_at"]
+
+    def test_mis_notify_is_idempotent_and_admin_can_force_resend(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        _approve_as(logged_in_client, "osokolovskaya@clinic.local")
+        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+
+        skipped = logged_in_client.post(f"/api/admin/requests/{rid}/notify-mis")
+        assert skipped.status_code == 200, skipped.text
+        assert skipped.json()["skipped"] is True
+        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+
+        forced = logged_in_client.post(f"/api/admin/requests/{rid}/notify-mis?force=true")
+        assert forced.status_code == 200, forced.text
+        assert forced.json()["skipped"] is False
+        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 2
+
+    def test_rework_resubmit_sends_mis_mail_only_after_final_round(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        rework_url = _extract_action_url(
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+        )
+        _post_decision(logged_in_client, rework_url, "правьте")
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+        logged_in_client.post(f"/api/requests/{rid}/resubmit", json={"submission_comment": "готово"})
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+        _approve_as(logged_in_client, "osokolovskaya@clinic.local")
+        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+        assert logged_in_client.get(f"/api/requests/{rid}").json()["mis_notified_at"]
+
+    def test_old_parallel_then_resubmit_still_sends_mis_mail(self, logged_in_client):
+        """Заявка без approval_chain (старая параллельная логика) после доработки
+        получает цепочку, и финальное письмо в МИС всё равно уходит."""
+        from app.database import get_db
+        from app.main import app as fastapi_app
+        from app.models import ServiceRequest
+
+        created = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()
+        rid = created["id"]
+        gen = fastapi_app.dependency_overrides[get_db]()
+        db = next(gen)
+        row = db.get(ServiceRequest, rid)
+        row.approval_chain = []
+        row.current_stage_index = 0
+        db.add(row)
+        db.commit()
+        db.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+        rework_url = _extract_action_url(
+            _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
+        )
+        _post_decision(logged_in_client, rework_url, "на старой логике")
+        _add_chain_anchors(logged_in_client)
+        logged_in_client.post(f"/api/requests/{rid}/resubmit", json={"submission_comment": "на новой цепочке"})
+        chain = logged_in_client.get(f"/api/requests/{rid}").json()["approval_chain"]
+        assert chain[0] == "nfolomova"
+        assert chain[-1] == "osokolovskaya"
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        _approve_as(logged_in_client, "mis.admin@clinic.local")
+        _approve_as(logged_in_client, "osokolovskaya@clinic.local")
+        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert len(attachments) == 1
+        assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "approved"
+
+    def test_empty_chain_parallel_all_approve_sends_mis_mail(self, logged_in_client):
+        from app.database import get_db
+        from app.main import app as fastapi_app
+        from app.models import ServiceRequest
+
+        rid = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        gen = fastapi_app.dependency_overrides[get_db]()
+        db = next(gen)
+        row = db.get(ServiceRequest, rid)
+        row.approval_chain = []
+        db.add(row)
+        db.commit()
+        db.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "pending"
+        from app.security import make_approval_token
+        logged_in_client.get(f"/api/approvals/{make_approval_token(rid, 'mis_admin')}/approve")
+        assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "approved"
+        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+
+
+class TestPrompt10Fields:
+    def test_price_undefined_without_prices_is_ok(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "price_undefined": True, "prices": [], "all_branches": False}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text
+
+    def test_change_requires_description_and_branches(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "change", "mis_code": "01.01.001"}
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 422
+        payload.update({
+            "change_description": "Цена",
+            "affected_branches": ["Куркино"],
+            "simple_justification": "Прайс",
+        })
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text
+
+    def test_complex_requires_included_services(self, logged_in_client):
+        payload = {**SAMPLE_REQUEST_PAYLOAD, "request_type": "complex_service", "included_services": []}
+        assert logged_in_client.post("/api/requests", json=payload).status_code == 422
+        payload["included_services"] = [{"name": "Приём терапевта", "code": "01.01.001"}]
+        r = logged_in_client.post("/api/requests", json=payload)
+        assert r.status_code == 201, r.text
+        detail = logged_in_client.get(f"/api/requests/{r.json()['id']}").json()
+        assert detail["payload"]["included_services"][0]["name"] == "Приём терапевта"
+
+
+class TestExcelImportBulk:
+    def test_template_and_preview_and_bulk(self, logged_in_client):
+        tpl = logged_in_client.get("/api/requests/template.xlsx")
+        assert tpl.status_code == 200
+        assert tpl.headers["content-type"].startswith("application/vnd.openxmlformats")
+
+        from openpyxl import load_workbook
+        from io import BytesIO
+        wb = load_workbook(BytesIO(tpl.content))
+        ws = wb.active
+        ws["A3"] = "new_service"
+        ws["B3"] = "Услуга из Excel для массовой загрузки"
+        ws["D3"] = "simple"
+        ws["E3"] = "нет"
+        ws["G3"] = "Обоснование из файла массовой загрузки услуг"
+        headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        price_col = headers.index("price_Куркино") + 1
+        ws.cell(3, price_col, 1200)
+        buf = BytesIO()
+        wb.save(buf)
+
+        preview = logged_in_client.post(
+            "/api/requests/import-preview",
+            files={"file": ("t.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        assert preview.status_code == 200, preview.text
+        results = preview.json()["results"]
+        assert len(results) == 1
+        assert results[0]["errors"] == []
+
+        bulk = logged_in_client.post("/api/requests/bulk", json={
+            "items": [results[0]["data"]],
+            "approver_ids": ["chief_doctor"],
+        })
+        assert bulk.status_code == 200, bulk.text
+        assert len(bulk.json()["created"]) == 1
+        assert bulk.json()["errors"] == []
+
 

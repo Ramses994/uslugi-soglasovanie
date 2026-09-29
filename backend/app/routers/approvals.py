@@ -16,12 +16,13 @@ prompt/modal на фронтенде из письма открыть нельз
 """
 import copy
 import json
+import logging
 from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -29,12 +30,20 @@ from ..models import ServiceRequest, RequestStatus
 from ..schemas import ServiceRequestIn
 from ..security import read_approval_token
 from ..services.approval_history import record as record_history
-from ..services.email_service import render_template, try_send_email, try_send_email_with_attachment
-from ..services.medialog_export import build_import_workbook
+from ..services.approval_chain import (
+    current_approver_id,
+    load_branch_names,
+    needs_folomova_price,
+    next_pending_index,
+    notify_approver,
+)
+from ..services.email_service import render_template, try_send_email
+from ..services.mis_notify import send_mis_import_email
 from ..config import get_settings
 
 router = APIRouter(prefix="/api/approvals", tags=["approvals"])
 settings = get_settings()
+logger = logging.getLogger("price_form.approvals")
 
 _ACTIONS = ("approve", "reject", "rework")
 _COMMENT_ACTIONS = ("reject", "rework")
@@ -99,12 +108,10 @@ def _comment_form_page(token: str, action: str, service_name: str) -> HTMLRespon
 def _notify_after_decision(
     status_value: str, request_id: str, service_name: str, initiator_email: str,
     approver_name: str, approver_role: str, decision: str,
-    mis_admin_email: str | None, import_xlsx: bytes | None,
     comment: str | None = None,
 ) -> None:
-    """Выполняется в фоне, ПОСЛЕ того как согласующий уже увидел страницу
-    подтверждения — сбой/задержка SMTP здесь не заставляет согласующего смотреть
-    на зависшую вкладку браузера, а статус заявки в БД уже обновлён к этому моменту."""
+    """Фон для reject/rework: статус уже в БД. Письмо в МИС уходит синхронно
+    в _apply_decision, чтобы не потерять вложение при сбое фоновой задачи."""
     html = render_template(
         "email_decision.html",
         status=status_value,
@@ -115,17 +122,7 @@ def _notify_after_decision(
         decision=decision,
         comment=comment,
     )
-    if status_value == RequestStatus.approved.value and import_xlsx is not None:
-        recipients = [initiator_email] + ([mis_admin_email] if mis_admin_email else [])
-        try_send_email_with_attachment(
-            to=recipients,
-            subject=f"[Согласовано] {service_name} — файл для импорта в Медиалог",
-            html_body=html,
-            attachment_bytes=import_xlsx,
-            attachment_filename=f"import_{request_id[:8]}.xlsx",
-        )
-    else:
-        try_send_email(to=[initiator_email], subject=f"[Обновление] {service_name}", html_body=html)
+    try_send_email(to=[initiator_email], subject=f"[Обновление] {service_name}", html_body=html)
 
 
 def _prepare_decision(token: str, action: str, db: Session):
@@ -166,6 +163,14 @@ def _prepare_decision(token: str, action: str, db: Session):
             ok=False,
         )
 
+    current = current_approver_id(entity)
+    if entity.approval_chain and current and current != data["approver_id"]:
+        return None, _confirmation_page(
+            "Сейчас не ваша очередь",
+            "Решение уже зафиксировано на этом этапе или заявка ожидает другого согласующего.",
+            ok=False,
+        )
+
     return {
         "data": data,
         "entity": entity,
@@ -191,10 +196,17 @@ def _apply_decision(ctx: dict, action: str, note: str | None, background_tasks: 
 
     if action in ("reject", "rework"):
         entity.status = RequestStatus.rework
-    elif all(a["decision"] == "approve" for a in approvals):
-        entity.status = RequestStatus.approved
     else:
-        entity.status = RequestStatus.pending
+        chain = list(entity.approval_chain or [])
+        nxt = next_pending_index(approvals, chain, int(entity.current_stage_index or 0)) if chain else None
+        if not chain:
+            entity.status = RequestStatus.approved if all(a["decision"] == "approve" for a in approvals) else RequestStatus.pending
+        elif nxt is None:
+            entity.status = RequestStatus.approved
+            entity.current_stage_index = max(len(chain) - 1, 0)
+        else:
+            entity.status = RequestStatus.pending
+            entity.current_stage_index = nxt
 
     record_history(
         db,
@@ -211,22 +223,103 @@ def _apply_decision(ctx: dict, action: str, note: str | None, background_tasks: 
     db.add(entity)
     db.commit()
 
-    req_in = ServiceRequestIn.model_validate(entity.payload)
-    import_xlsx = build_import_workbook(req_in) if entity.status == RequestStatus.approved else None
-    mis_admin_email = ctx["approvers_map"].get("mis_admin", {}).get("email")
+    payload = entity.payload or {}
+    req_in = None
+    try:
+        req_in = ServiceRequestIn.model_validate(payload)
+        service_name = req_in.name
+    except Exception:
+        logger.exception("Payload заявки %s не проходит схему после решения — письмо в МИС всё равно попытаемся отправить", entity.id)
+        service_name = str(payload.get("name") or "Заявка")
 
-    background_tasks.add_task(
-        _notify_after_decision,
-        entity.status.value, entity.id, req_in.name, entity.initiator_email,
-        approver["name"], approver["role"], action, mis_admin_email, import_xlsx, note,
-    )
+    if entity.status == RequestStatus.approved:
+        send_mis_import_email(
+            db, entity, ctx["approvers_map"],
+            force=False,
+            approver_name=approver["name"],
+            approver_role=approver["role"],
+        )
+    else:
+        background_tasks.add_task(
+            _notify_after_decision,
+            entity.status.value, entity.id, service_name, entity.initiator_email,
+            approver["name"], approver["role"], action, note,
+        )
+
+    if entity.status == RequestStatus.pending and action == "approve":
+        nxt_id = current_approver_id(entity)
+        if nxt_id and req_in is not None:
+            background_tasks.add_task(
+                notify_approver,
+                entity.id, entity.initiator_name, entity.initiator_position, entity.initiator_department,
+                entity.initiator_email, req_in, nxt_id, ctx["approvers_map"],
+                entity.version or 1, entity.submission_comment,
+                bool(payload.get("price_undefined")),
+            )
 
     title, verb = _ACTION_TITLES[action]
     extra = "<br>Комментарий сохранён." if note else ""
+    if entity.status == RequestStatus.pending and action == "approve":
+        title = "Согласовано, заявка передана на следующий этап"
+    elif entity.status == RequestStatus.approved:
+        title = "Заявка полностью согласована"
     return _confirmation_page(
         title,
-        f"Услуга «{escape(req_in.name)}» отмечена вами как «{verb}».{extra}",
+        f"Услуга «{escape(service_name)}» отмечена вами как «{verb}».{extra}",
     )
+
+
+def _price_form_page(token: str, service_name: str) -> HTMLResponse:
+    html = render_template(
+        "approval_price_form.html",
+        service_name=service_name,
+        form_url=f"/api/approvals/{token}/approve-with-price",
+        branches=load_branch_names(),
+    )
+    return HTMLResponse(html)
+
+
+@router.get("/{token}/approve-with-price")
+def approve_price_get(token: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    ctx, err = _prepare_decision(token, "approve", db)
+    if err:
+        return err
+    if not needs_folomova_price(ctx["entity"], ctx["data"]["approver_id"]):
+        return RedirectResponse(f"/api/approvals/{token}/approve")
+    req_in = ServiceRequestIn.model_validate(ctx["entity"].payload)
+    return _price_form_page(token, req_in.name)
+
+
+@router.post("/{token}/approve-with-price")
+async def approve_price_post(
+    token: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    ctx, err = _prepare_decision(token, "approve", db)
+    if err:
+        return err
+    form = await request.form()
+    prices = []
+    for key, val in form.items():
+        if not str(key).startswith("price_") or val in (None, ""):
+            continue
+        branch = str(key)[len("price_"):]
+        try:
+            price = float(str(val).replace(",", "."))
+        except ValueError:
+            continue
+        if price > 0:
+            prices.append({"branch": branch, "price": price})
+    if not prices:
+        req_in = ServiceRequestIn.model_validate(ctx["entity"].payload)
+        return _confirmation_page("Укажите цену", "Нужна хотя бы одна цена по филиалу.", ok=False)
+    payload = copy.deepcopy(ctx["entity"].payload or {})
+    payload["prices"] = prices
+    payload["price_undefined"] = False
+    ctx["entity"].payload = payload
+    return _apply_decision(ctx, "approve", None, background_tasks, db)
 
 
 @router.get("/{token}/{action}")
@@ -240,6 +333,8 @@ def decide_get(
     ctx, err = _prepare_decision(token, action, db)
     if err:
         return err
+    if action == "approve" and needs_folomova_price(ctx["entity"], ctx["data"]["approver_id"]):
+        return RedirectResponse(f"/api/approvals/{token}/approve-with-price")
     if action in _COMMENT_ACTIONS:
         req_in = ServiceRequestIn.model_validate(ctx["entity"].payload)
         return _comment_form_page(token, action, req_in.name)

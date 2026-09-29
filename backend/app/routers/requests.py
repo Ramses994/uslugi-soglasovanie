@@ -1,32 +1,32 @@
-import copy
 import json
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import ServiceRequest, RequestStatus
 from ..schemas import ResubmitIn, ServiceRequestIn, UserProfile
+from ..services.approval_chain import (
+    build_approval_chain,
+    empty_approvals,
+    first_pending_index,
+    merge_approvals_keeping_approves,
+    notify_approver,
+)
 from ..services.approval_history import list_for_request, record as record_history, serialize as serialize_history
-from ..services.email_service import render_template, try_send_email
-from ..security import make_approval_token
+from ..services.xlsx_import import parse_xlsx_requests
+from ..services.xlsx_template import build_template_workbook
 from ..config import get_settings
 from .auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/api/requests", tags=["requests"])
 settings = get_settings()
-
-_SERVICE_TYPE_LABELS = {
-    "simple": "Простая услуга",
-    "complex": "Сложная услуга",
-    "combined": "Комплексная услуга",
-    "program": "Медпрограмма",
-    "package": "Пакет услуг",
-    "prn": "ПРН",
-}
 
 
 def _load_approvers() -> dict[str, dict]:
@@ -39,46 +39,40 @@ def _payload_dict(body: ServiceRequestIn) -> dict:
     return json.loads(body.model_dump_json(exclude={"submission_comment"}))
 
 
-def _notify_approvers(
-    request_id: str,
-    initiator_name,
-    initiator_position,
-    initiator_department,
-    initiator_email: str,
+def _queue_current_stage_email(
+    background_tasks: BackgroundTasks,
+    entity: ServiceRequest,
     body: ServiceRequestIn,
-    approver_ids: list[str],
     approvers_map: dict[str, dict],
-    version: int = 1,
-    submission_comment: str | None = None,
 ) -> None:
-    """Выполняется в фоне (BackgroundTasks), ПОСЛЕ того как ответ 201 уже ушёл клиенту.
-    Заявка к этому моменту уже закоммичена в БД — сбой отправки конкретному согласующему
-    (недоступен SMTP, опечатка в адресе и т.п.) не должен превращать успешную подачу
-    заявки в ошибку 500 и не должен блокировать HTTP-запрос на время SMTP-таймаута."""
-    for aid in approver_ids:
-        approver = approvers_map[aid]
-        token = make_approval_token(request_id, aid)
-        html = render_template(
-            "email_request.html",
-            request_id=request_id,
-            initiator_name=initiator_name,
-            initiator_position=initiator_position,
-            initiator_department=initiator_department,
-            data=body,
-            service_type_label=_SERVICE_TYPE_LABELS.get(body.service_type.value, body.service_type.value),
-            approve_url=f"{settings.app_base_url}/api/approvals/{token}/approve",
-            reject_url=f"{settings.app_base_url}/api/approvals/{token}/reject",
-            rework_url=f"{settings.app_base_url}/api/approvals/{token}/rework",
-            app_url=settings.app_base_url,
-            version=version,
-            submission_comment=submission_comment or "",
-        )
-        try_send_email(
-            to=[approver["email"]],
-            subject=f"[Согласование прейскуранта] {body.name} — требуется решение ({approver['role']}, версия {version})",
-            html_body=html,
-            reply_to=initiator_email,
-        )
+    chain = list(entity.approval_chain or [])
+    idx = int(entity.current_stage_index or 0)
+    if not chain or idx < 0 or idx >= len(chain):
+        return
+    aid = chain[idx]
+    payload = entity.payload or {}
+    background_tasks.add_task(
+        notify_approver,
+        entity.id, entity.initiator_name, entity.initiator_position, entity.initiator_department,
+        entity.initiator_email, body, aid, approvers_map,
+        entity.version, entity.submission_comment,
+        bool(payload.get("price_undefined")),
+    )
+
+
+def _prepare_chain(body: ServiceRequestIn, approvers_map: dict[str, dict]) -> list[str]:
+    missing = [aid for aid in body.approver_ids if aid not in approvers_map]
+    if missing:
+        raise HTTPException(400, f"Неизвестные согласующие: {missing}")
+    chain = build_approval_chain(body.approver_ids, approvers_map)
+    if not chain:
+        raise HTTPException(400, "Не удалось построить цепочку согласования")
+    return chain
+
+
+class BulkCreateIn(BaseModel):
+    items: list[ServiceRequestIn]
+    approver_ids: list[str] = []
 
 
 @router.post("", status_code=201)
@@ -89,9 +83,7 @@ def create_request(
     user: UserProfile = Depends(get_current_user),
 ):
     approvers_map = _load_approvers()
-    missing = [aid for aid in body.approver_ids if aid not in approvers_map]
-    if missing:
-        raise HTTPException(400, f"Неизвестные согласующие: {missing}")
+    chain = _prepare_chain(body, approvers_map)
 
     entity = ServiceRequest(
         request_type=body.request_type,
@@ -102,7 +94,9 @@ def create_request(
         initiator_department=user.department,
         initiator_position=user.position,
         payload=_payload_dict(body),
-        approvals=[{"approver_id": aid, "decision": None, "comment": None, "decided_at": None} for aid in body.approver_ids],
+        approvals=empty_approvals(chain),
+        approval_chain=chain,
+        current_stage_index=0,
         version=1,
         submission_comment=body.submission_comment,
     )
@@ -110,16 +104,14 @@ def create_request(
     db.commit()
     db.refresh(entity)
 
-    # Письма уходят ПОСЛЕ ответа клиенту (см. _notify_approvers) — подача заявки
-    # подтверждается сразу же и не зависит от доступности/скорости SMTP.
-    background_tasks.add_task(
-        _notify_approvers,
-        entity.id, entity.initiator_name, entity.initiator_position, entity.initiator_department,
-        entity.initiator_email, body, body.approver_ids, approvers_map,
-        entity.version, entity.submission_comment,
-    )
-
-    return {"id": entity.id, "status": entity.status, "version": entity.version}
+    _queue_current_stage_email(background_tasks, entity, body, approvers_map)
+    return {
+        "id": entity.id,
+        "status": entity.status,
+        "version": entity.version,
+        "approval_chain": chain,
+        "current_stage_index": 0,
+    }
 
 
 _OWNER_EDITABLE_STATUSES = {RequestStatus.rejected, RequestStatus.rework}
@@ -152,6 +144,8 @@ def _list_item(r: ServiceRequest) -> dict:
         "created_at": r.created_at,
         "approvals": r.approvals,
         "version": r.version or 1,
+        "approval_chain": r.approval_chain or [],
+        "current_stage_index": r.current_stage_index or 0,
     }
 
 
@@ -169,6 +163,9 @@ def _detail(r: ServiceRequest, db: Session) -> dict:
         "updated_at": r.updated_at,
         "version": r.version or 1,
         "submission_comment": r.submission_comment,
+        "approval_chain": r.approval_chain or [],
+        "current_stage_index": r.current_stage_index or 0,
+        "mis_notified_at": r.mis_notified_at.isoformat() if r.mis_notified_at else None,
         "history": [serialize_history(h) for h in list_for_request(db, r.id)],
     }
 
@@ -203,6 +200,64 @@ def list_requests(
     return items
 
 
+@router.get("/template.xlsx")
+def download_template(user: UserProfile = Depends(get_current_user)):
+    from ..services.approval_chain import load_branch_names
+
+    content = build_template_workbook(load_branch_names())
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=service_requests_template.xlsx"},
+    )
+
+
+@router.post("/import-preview")
+async def import_preview(
+    file: UploadFile = File(...),
+    user: UserProfile = Depends(get_current_user),
+):
+    raw = await file.read()
+    try:
+        rows = parse_xlsx_requests(raw)
+    except Exception as exc:
+        raise HTTPException(400, f"Не удалось прочитать Excel: {exc}")
+    results = []
+    for i, data in enumerate(rows, start=3):
+        try:
+            parsed = ServiceRequestIn.model_validate(data)
+            results.append({"row": i, "data": parsed.model_dump(mode="json"), "errors": []})
+        except ValidationError as exc:
+            msgs = []
+            for err in exc.errors():
+                loc = ".".join(str(p) for p in err.get("loc", []) if p != "body")
+                msgs.append(f"{loc}: {err.get('msg')}" if loc else err.get("msg", "ошибка"))
+            results.append({"row": i, "data": data, "errors": msgs})
+    return {"results": results}
+
+
+@router.post("/bulk")
+def create_requests_bulk(
+    body: BulkCreateIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(get_current_user),
+):
+    created = []
+    errors = []
+    for i, item in enumerate(body.items):
+        try:
+            if body.approver_ids:
+                item.approver_ids = list(body.approver_ids)
+            res = create_request(item, background_tasks, db, user)
+            created.append(res["id"])
+        except HTTPException as exc:
+            errors.append({"index": i, "error": exc.detail})
+        except Exception as exc:
+            errors.append({"index": i, "error": str(exc)})
+    return {"created": created, "errors": errors}
+
+
 @router.get("/{request_id}/history")
 def get_request_history(
     request_id: str,
@@ -224,7 +279,7 @@ def resubmit_request(
     """Повторно отправить заявку на согласование после доработки.
     Сотрудник — свою заявку в статусе rework/rejected.
     Админ — также согласованную (approved), если нужно запустить цикл заново.
-    Решения в JSON сбрасываются, version увеличивается, письма уходят заново."""
+    Цепочка пересчитывается; у кого уже есть approve — этап пропускается."""
     row = db.get(ServiceRequest, request_id)
     if not row:
         raise HTTPException(404, "Заявка не найдена")
@@ -236,26 +291,26 @@ def resubmit_request(
 
     approvers_map = _load_approvers()
     payload = ServiceRequestIn.model_validate({**(row.payload or {}), "submission_comment": None})
-    missing = [aid for aid in payload.approver_ids if aid not in approvers_map]
-    if missing:
-        raise HTTPException(400, f"Неизвестные согласующие: {missing}")
+    chain = _prepare_chain(payload, approvers_map)
 
     status_before = row.status.value
     comment = body.submission_comment if body else None
     if comment is not None:
         row.submission_comment = comment
 
-    approvals = copy.deepcopy(row.approvals) or [
-        {"approver_id": aid, "decision": None, "comment": None, "decided_at": None}
-        for aid in payload.approver_ids
-    ]
-    for a in approvals:
-        a["decision"] = None
-        a["comment"] = None
-        a["decided_at"] = None
+    reset_all = status_before == RequestStatus.approved.value
+    approvals = merge_approvals_keeping_approves(chain, row.approvals, reset_all=reset_all)
+    idx = first_pending_index(approvals, chain)
+    if idx >= len(chain):
+        idx = 0
+        approvals = empty_approvals(chain)
+
     row.approvals = approvals
+    row.approval_chain = chain
+    row.current_stage_index = idx
     row.version = (row.version or 1) + 1
     row.status = RequestStatus.pending
+    row.mis_notified_at = None
     row.updated_at = datetime.utcnow()
 
     record_history(
@@ -274,13 +329,14 @@ def resubmit_request(
     db.commit()
     db.refresh(row)
 
-    background_tasks.add_task(
-        _notify_approvers,
-        row.id, row.initiator_name, row.initiator_position, row.initiator_department,
-        row.initiator_email, payload, payload.approver_ids, approvers_map,
-        row.version, row.submission_comment,
-    )
-    return {"id": row.id, "status": row.status, "version": row.version}
+    _queue_current_stage_email(background_tasks, row, payload, approvers_map)
+    return {
+        "id": row.id,
+        "status": row.status,
+        "version": row.version,
+        "approval_chain": chain,
+        "current_stage_index": idx,
+    }
 
 
 @router.get("/{request_id}")

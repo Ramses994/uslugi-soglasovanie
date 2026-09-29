@@ -40,7 +40,6 @@ from app.config import get_settings  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 from app.services.dictionaries import store as dictionaries_store  # noqa: E402
-import app.routers.requests as requests_router  # noqa: E402
 import app.routers.approvals as approvals_router  # noqa: E402
 
 # Справочники (ЕРЛУ-КДЛ, номенклатура Минздрава) обычно грузятся в память на
@@ -80,6 +79,8 @@ def client(tmp_path, monkeypatch):
     # Не полагаемся на наличие/содержимое .env в окружении, где гоняются тесты —
     # роль администратора для тестового пользователя "ivanov" задаём явно здесь.
     monkeypatch.setattr(settings, "form_admin_logins", "ivanov")
+    monkeypatch.setattr(settings, "ldap_directory_mail_suffix", "@clinic.local")
+    monkeypatch.setattr(settings, "mis_notify_emails", "")
 
     sent = []
 
@@ -95,9 +96,12 @@ def client(tmp_path, monkeypatch):
         })
         return True
 
-    monkeypatch.setattr(requests_router, "try_send_email", fake_send)
     monkeypatch.setattr(approvals_router, "try_send_email", fake_send)
-    monkeypatch.setattr(approvals_router, "try_send_email_with_attachment", fake_send_with_attachment)
+    import app.services.approval_chain as approval_chain
+    import app.services.email_service as email_service
+    monkeypatch.setattr(approval_chain, "try_send_email", fake_send)
+    monkeypatch.setattr(email_service, "try_send_email", fake_send)
+    monkeypatch.setattr(email_service, "try_send_email_with_attachment", fake_send_with_attachment)
 
     with TestClient(fastapi_app) as test_client:
         test_client.sent_emails = sent

@@ -293,7 +293,7 @@
                 <div class="flex items-center gap-3 text-sm border border-slate-100 rounded-lg px-3 py-2">
                   <div class="flex-1">
                     <div class="font-medium text-slate-800" x-text="a.name"></div>
-                    <div class="text-xs text-slate-500" x-text="a.role + ' · ' + a.email + ' · id: ' + a.id"></div>
+                    <div class="text-xs text-slate-500" x-text="a.role + ' · ' + a.email + ' · id: ' + a.id + (a.order != null ? ' · порядок: ' + a.order : '')"></div>
                   </div>
                   <button type="button" class="text-red-500 text-xs hover:underline" @click="deleteApprover(a.id)">Удалить</button>
                 </div>
@@ -325,6 +325,7 @@
                 <input class="input" placeholder="ФИО" x-model="newApprover.name">
                 <input class="input" placeholder="Email" x-model="newApprover.email">
                 <input class="input" placeholder="Роль (напр. Гл. врач)" x-model="newApprover.role">
+                <input class="input" type="number" placeholder="Порядок в цепочке (1 — раньше)" x-model.number="newApprover.order">
               </div>
               <button type="button" class="btn-secondary" @click="addApprover()">+ Добавить</button>
             </div>
@@ -371,7 +372,7 @@
               <div class="text-green-600 text-2xl">✔</div>
               <div>
                 <div class="font-semibold text-green-800">Заявка №<span x-text="submittedId.slice(0,8)"></span> отправлена на согласование</div>
-                <p class="text-sm text-green-700 mt-1">Согласующие получили письма со ссылками «Согласовать/Отклонить». Статус можно отслеживать в разделе «Мои заявки».</p>
+                <p class="text-sm text-green-700 mt-1">Письмо ушло первому в цепочке (маркетинг). Следующие получат уведомление после согласования предыдущего этапа.</p>
               </div>
               <button class="ml-auto text-green-700 text-sm underline" @click="resetForm()">Подать ещё одну</button>
             </div>
@@ -380,10 +381,51 @@
 
         <form @submit.prevent="submitRequest()" x-show="!submitted" class="space-y-6">
 
+          <div class="card">
+            <h2 class="text-base font-semibold text-slate-900 mb-3">Массовая загрузка из Excel</h2>
+            <div class="flex flex-wrap gap-2 mb-3">
+              <button type="button" class="btn-secondary" @click="downloadTemplate()">Скачать шаблон Excel</button>
+              <label class="btn-secondary cursor-pointer">
+                Загрузить из Excel
+                <input type="file" class="hidden" accept=".xlsx" @change="onExcelFile($event)">
+              </label>
+            </div>
+            <div x-show="importPreview && importPreview.length" x-cloak class="space-y-3">
+              <p class="text-xs text-slate-500">Отметьте строки к отправке. Фоломова и Соколовская добавятся в каждую заявку автоматически.</p>
+              <div class="overflow-auto max-h-64 border border-slate-200 rounded-lg">
+                <table class="min-w-full text-xs">
+                  <thead class="bg-slate-50"><tr>
+                    <th class="p-2"></th><th class="p-2 text-left">Строка</th><th class="p-2 text-left">Наименование</th><th class="p-2 text-left">Статус</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="row in importPreview" :key="row.row">
+                      <tr class="border-t border-slate-100">
+                        <td class="p-2"><input type="checkbox" x-model="row.selected" :disabled="row.errors && row.errors.length"></td>
+                        <td class="p-2" x-text="row.row"></td>
+                        <td class="p-2" x-text="(row.data && row.data.name) || '—'"></td>
+                        <td class="p-2" x-text="row.errors && row.errors.length ? row.errors.join('; ') : 'ок'"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <p class="text-xs font-medium text-slate-600">Согласующие на всю пачку (кроме автоматических)</p>
+              <div class="grid sm:grid-cols-2 gap-2">
+                <template x-for="a in selectableApprovers()" :key="'bulk-'+a.id">
+                  <label class="flex items-center gap-2 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                    <input type="checkbox" class="rounded border-slate-300 text-blue-600" :value="a.id" x-model="bulkApproverIds">
+                    <span x-text="a.name"></span>
+                  </label>
+                </template>
+              </div>
+              <button type="button" class="btn-primary" :disabled="importBusy" @click="submitBulk()">Отправить выбранные на согласование</button>
+            </div>
+          </div>
+
           <!-- Тип заявки -->
           <div class="card">
             <h2 class="text-base font-semibold text-slate-900 mb-4">1. Тип заявки</h2>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <template x-for="rt in requestTypes" :key="rt.value">
                 <button type="button"
                         @click="form.request_type = rt.value"
@@ -408,16 +450,24 @@
               <p class="text-xs text-slate-400 mt-1">Код Минздрава ниже подбирается автоматически по этому названию — при уверенном совпадении подставится сам, его можно снять крестиком или заменить вручную через поиск.</p>
             </div>
 
-            <div class="mb-4" x-show="form.request_type === 'delete'" x-cloak>
+            <div class="mb-4" x-show="['delete','change'].includes(form.request_type)" x-cloak>
               <label class="field-label">Код услуги в МИС Медиалог *</label>
               <input class="input" x-model="form.mis_code" maxlength="64" placeholder="Например: 01.01.001"
-                     :required="form.request_type === 'delete'">
-              <p class="text-xs text-slate-400 mt-1">Обязательно для удаления услуги — код должен точно совпадать с действующей услугой в МИС.</p>
+                     :required="['delete','change'].includes(form.request_type)">
+              <p class="text-xs text-slate-400 mt-1">Обязательно для удаления и изменения — код должен совпадать с услугой в МИС.</p>
             </div>
 
-            <div class="mb-4">
+            <div class="mb-4" x-show="form.request_type === 'change'" x-cloak>
+              <label class="field-label">Что меняется *</label>
+              <textarea class="input" rows="2" x-model="form.change_description"
+                        :required="form.request_type === 'change'"
+                        placeholder="Например: цена, наименование, ограничение по полу/возрасту..."></textarea>
+            </div>
+
+            <div class="mb-4" x-show="!['delete','change'].includes(form.request_type)">
               <label class="field-label">Тип услуги *</label>
-              <select class="input" x-model="form.service_type" required>
+              <select class="input" x-model="form.service_type"
+                      :required="!['delete','change'].includes(form.request_type)">
                 <template x-for="t in serviceTypes" :key="t.value">
                   <option :value="t.value" x-text="t.label"></option>
                 </template>
@@ -434,13 +484,13 @@
             </div>
 
             <!-- Признак лаборатории -->
-            <div class="mb-4 flex items-center gap-2">
+            <div class="mb-4 flex items-center gap-2" x-show="!['delete','change'].includes(form.request_type)">
               <input type="checkbox" id="is_lab" x-model="form.is_lab_service" class="rounded border-slate-300 text-blue-600">
               <label for="is_lab" class="text-sm text-slate-700">Это лабораторное исследование / анализ (ЕРЛУ-КДЛ)</label>
             </div>
 
             <!-- Автокомплит Минздрав -->
-            <div class="mb-2 relative">
+            <div class="mb-2 relative" x-show="!['delete','change'].includes(form.request_type)">
               <label class="field-label">Код Минздрава (Номенклатура медицинских услуг, НСИ 1.2.643.5.1.13.13.11.1070)</label>
               <input class="input" x-model="minzdravQuery" @input="searchMinzdrav()" placeholder="Начните вводить название или код (A03.26.009)">
               <div x-show="minzdravResults.length" class="absolute z-20 bg-white border border-slate-200 rounded-lg mt-1 w-full max-h-56 overflow-auto shadow-lg">
@@ -466,13 +516,14 @@
           </div>
 
           <!-- Блок ЕРЛУ-КДЛ (динамический) -->
-          <div class="card border-amber-200 bg-amber-50/40" x-show="form.is_lab_service" x-transition>
+          <div class="card border-amber-200 bg-amber-50/40" x-show="form.is_lab_service && !['delete','change'].includes(form.request_type)" x-transition>
             <h2 class="text-base font-semibold text-slate-900 mb-1">3. Интеграция с ЕРЛУ-КДЛ *</h2>
             <p class="text-xs text-slate-500 mb-4">Обязательно для лабораторных исследований — заполняется по справочнику ЕРЛУ-КДЛ.</p>
 
             <div class="mb-4 relative">
               <label class="field-label">Точное наименование анализа (как в ЛИС / ЕРЛУ) *</label>
-              <input class="input" x-model="erluQuery" @input="searchErlu()" :required="form.is_lab_service"
+              <input class="input" x-model="erluQuery" @input="searchErlu()"
+                     :required="form.is_lab_service && !['delete','change'].includes(form.request_type)"
                      placeholder="Например: Клинический анализ крови">
               <div x-show="erluResults.length" class="absolute z-20 bg-white border border-slate-200 rounded-lg mt-1 w-full max-h-64 overflow-auto shadow-lg">
                 <template x-for="r in erluResults" :key="r.erlu_code">
@@ -499,11 +550,13 @@
               </div>
               <div>
                 <label class="field-label">Наименование направления исследования *</label>
-                <input class="input" x-model="form.lab.direction_name" :required="form.is_lab_service">
+                <input class="input" x-model="form.lab.direction_name"
+                       :required="form.is_lab_service && !['delete','change'].includes(form.request_type)">
               </div>
               <div>
                 <label class="field-label">Тип биоматериала *</label>
-                <select class="input" x-model="form.lab.biomaterial_type" :required="form.is_lab_service">
+                <select class="input" x-model="form.lab.biomaterial_type"
+                        :required="form.is_lab_service && !['delete','change'].includes(form.request_type)">
                   <option value="">— выбрать —</option>
                   <option>Венозная кровь</option>
                   <option>Капиллярная кровь</option>
@@ -517,9 +570,41 @@
             </div>
           </div>
 
+          <div class="card" x-show="form.request_type === 'complex_service'" x-cloak>
+            <h2 class="text-base font-semibold text-slate-900 mb-3">4. Состав комплексной услуги</h2>
+            <template x-for="(item, idx) in form.included_services" :key="idx">
+              <div class="flex gap-2 mb-2">
+                <input class="input" x-model="item.name" placeholder="Наименование входящей услуги">
+                <input class="input w-40" x-model="item.code" placeholder="Код в МИС">
+                <button type="button" class="text-red-500 px-2" @click="form.included_services.splice(idx, 1)">✕</button>
+              </div>
+            </template>
+            <button type="button" class="btn-secondary" @click="form.included_services.push({name: '', code: ''})">+ Добавить услугу</button>
+          </div>
+
+          <div class="card" x-show="['delete','change'].includes(form.request_type)" x-cloak>
+            <h2 class="text-base font-semibold text-slate-900 mb-3">Филиалы *</h2>
+            <template x-for="branch in branches" :key="'aff-'+branch">
+              <label class="flex items-center gap-2 mb-2 text-sm">
+                <input type="checkbox" class="rounded border-slate-300 text-blue-600"
+                       :checked="form.affected_branches.includes(branch)"
+                       @change="toggleAffectedBranch(branch)">
+                <span x-text="branch"></span>
+              </label>
+            </template>
+            <label class="field-label mt-4">Обоснование *</label>
+            <textarea class="input" rows="3" x-model="form.simple_justification"
+                      :required="['delete','change'].includes(form.request_type)"></textarea>
+          </div>
+
           <!-- Цены по филиалам -->
-          <div class="card">
-            <h2 class="text-base font-semibold text-slate-900 mb-4">4. Цены по филиалам *</h2>
+          <div class="card" x-show="!['delete','change'].includes(form.request_type)">
+            <h2 class="text-base font-semibold text-slate-900 mb-4">5. Цены по филиалам *</h2>
+            <div class="mb-3 flex items-center gap-2">
+              <input type="checkbox" id="price_undefined" x-model="form.price_undefined" class="rounded border-slate-300 text-blue-600">
+              <label for="price_undefined" class="text-sm text-slate-700">Цена не определена (укажет маркетинг)</label>
+            </div>
+            <div x-show="!form.price_undefined">
             <div class="mb-3 flex items-center gap-2">
               <input type="checkbox" id="all_branches" x-model="form.all_branches" @change="toggleAllBranches()" class="rounded border-slate-300 text-blue-600">
               <label for="all_branches" class="text-sm text-slate-700">Одинаковая цена во всех филиалах</label>
@@ -528,7 +613,8 @@
             <template x-if="form.all_branches">
               <div class="max-w-xs">
                 <label class="field-label">Цена, ₽</label>
-                <input class="input" type="number" min="0" step="0.01" x-model.number="uniformPrice" @input="applyUniformPrice()" required>
+                <input class="input" type="number" min="0" step="0.01" x-model.number="uniformPrice" @input="applyUniformPrice()"
+                       :required="form.all_branches && !form.price_undefined && !['delete','change'].includes(form.request_type)">
               </div>
             </template>
 
@@ -545,10 +631,11 @@
                 </template>
               </div>
             </template>
+            </div>
           </div>
 
           <!-- Опциональные поля -->
-          <div class="card">
+          <div class="card" x-show="!['delete','change'].includes(form.request_type)">
             <button type="button" class="flex items-center justify-between w-full" @click="showOptional = !showOptional">
               <h2 class="text-base font-semibold text-slate-900">5. Дополнительные параметры (необязательно)</h2>
               <span class="text-slate-400" x-text="showOptional ? '▲' : '▼'"></span>
@@ -614,7 +701,7 @@
           </div>
 
           <!-- Деловое обоснование -->
-          <div class="card">
+          <div class="card" x-show="!['delete','change'].includes(form.request_type)">
             <button type="button" class="flex items-center justify-between w-full" @click="showBusiness = !showBusiness">
               <h2 class="text-base font-semibold text-slate-900">6. Деловое обоснование *</h2>
               <span class="text-slate-400" x-text="showBusiness ? '▲' : '▼'"></span>
@@ -652,7 +739,8 @@
               </div>
               <div>
                 <label class="field-label">Суть услуги, позиционирование, продвижение *</label>
-                <textarea class="input" rows="2" x-model="form.business.description" required
+                <textarea class="input" rows="2" x-model="form.business.description"
+                          :required="!['delete','change'].includes(form.request_type)"
                           placeholder="Зачем услуга нужна, кому предлагается, как будет продвигаться"></textarea>
               </div>
             </div>
@@ -660,10 +748,10 @@
 
           <!-- Маршрутизация -->
           <div class="card">
-            <h2 class="text-base font-semibold text-slate-900 mb-1">7. Согласующие *</h2>
-            <p class="text-xs text-slate-500 mb-4">Выберите, кому направить заявку на согласование.</p>
+            <h2 class="text-base font-semibold text-slate-900 mb-1">7. Согласующие</h2>
+            <p class="text-xs text-slate-500 mb-4">Фоломова всегда первая, Соколовская — последняя. Здесь выбирается середина цепочки.</p>
             <div class="grid sm:grid-cols-2 gap-2">
-              <template x-for="a in approvers" :key="a.id">
+              <template x-for="a in selectableApprovers()" :key="a.id">
                 <label class="flex items-center gap-2 border border-slate-200 rounded-lg px-3 py-2 text-sm cursor-pointer hover:bg-slate-50"
                        :class="form.approver_ids.includes(a.id) ? 'border-blue-400 bg-blue-50' : ''">
                   <input type="checkbox" class="rounded border-slate-300 text-blue-600" :value="a.id" x-model="form.approver_ids">
@@ -696,6 +784,6 @@
   </template>
 </div>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

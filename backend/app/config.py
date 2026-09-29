@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     # (например, CN=PriceFormAdmins) — см. раздел 10 ТЗ.md; строка-список — самый простой
     # вариант для MVP и для локальной разработки/демо без реального AD.
     form_admin_logins: str = ""
+    # Явные адреса для письма с файлом импорта в МИС (через запятую). Нужны, когда
+    # администратор формы есть в FORM_ADMIN_LOGINS, но его нет в approvers.json.
+    mis_notify_emails: str = ""
 
     @model_validator(mode="after")
     def _resolve_relative_paths(self):

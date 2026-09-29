@@ -1,0 +1,132 @@
+"""Финальное письмо в МИС: файл импорта + получатели (инициатор, mis_admin, админы формы)."""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from ..config import get_settings
+from ..models import RequestStatus, ServiceRequest
+from ..schemas import ServiceRequestIn
+from ..services import email_service
+from ..services.email_service import render_template
+from ..services.medialog_export import build_import_workbook
+
+logger = logging.getLogger("price_form.mis_notify")
+
+
+def mis_recipients(initiator_email: str, approvers_map: dict) -> list[str]:
+    """Кому уходит файл импорта после полного согласования.
+
+    Нельзя опираться только на запись mis_admin в approvers.json — в боевом
+    каталоге её нет. FORM_ADMIN_LOGINS тоже часто не совпадает с id согласующего
+    (админа убрали из маршрута, а письма в МИС он по-прежнему должен получать).
+    """
+    settings = get_settings()
+    seen: list[str] = []
+
+    def add(addr: str | None) -> None:
+        if addr and addr not in seen:
+            seen.append(addr)
+
+    add(initiator_email)
+    add((approvers_map.get("mis_admin") or {}).get("email"))
+
+    by_login = {}
+    for aid, info in (approvers_map or {}).items():
+        email = (info or {}).get("email")
+        by_login[str(aid).lower()] = email
+        login = str((info or {}).get("login") or "").lower()
+        if login:
+            by_login[login] = email
+
+    suffix = (settings.ldap_directory_mail_suffix or "").strip()
+    if suffix and not suffix.startswith("@"):
+        suffix = "@" + suffix
+
+    for login in settings.admin_logins():
+        add(by_login.get(login))
+        if suffix:
+            add(f"{login}{suffix}")
+
+    for raw in (settings.mis_notify_emails or "").split(","):
+        add(raw.strip())
+    return seen
+
+
+def _service_name(payload: dict | None) -> str:
+    return str((payload or {}).get("name") or "Заявка")
+
+
+def build_workbook_safe(payload: dict | None) -> bytes | None:
+    try:
+        req_in = ServiceRequestIn.model_validate(payload or {})
+        return build_import_workbook(req_in)
+    except Exception:
+        logger.exception("Не удалось собрать файл импорта МИС из payload")
+        return None
+
+
+def send_mis_import_email(
+    db: Session,
+    entity: ServiceRequest,
+    approvers_map: dict,
+    *,
+    force: bool = False,
+    approver_name: str = "",
+    approver_role: str = "",
+) -> dict:
+    """Отправляет письмо с xlsx. Возвращает {ok, skipped, recipients, error}."""
+    if entity.status != RequestStatus.approved:
+        return {"ok": False, "skipped": True, "recipients": [], "error": "Заявка не в статусе approved"}
+    if entity.mis_notified_at and not force:
+        return {
+            "ok": True,
+            "skipped": True,
+            "recipients": [],
+            "error": None,
+            "mis_notified_at": entity.mis_notified_at.isoformat() if entity.mis_notified_at else None,
+        }
+
+    payload = entity.payload or {}
+    name = _service_name(payload)
+    xlsx = build_workbook_safe(payload)
+    recipients = mis_recipients(entity.initiator_email, approvers_map)
+    html = render_template(
+        "email_decision.html",
+        status=RequestStatus.approved.value,
+        service_name=name,
+        request_id=entity.id,
+        approver_name=approver_name or "согласование завершено",
+        approver_role=approver_role or "",
+        decision="approve",
+        comment=None,
+    )
+    if not recipients:
+        logger.error("Нет получателей письма МИС для заявки %s", entity.id)
+        return {"ok": False, "skipped": False, "recipients": [], "error": "Пустой список получателей"}
+
+    if xlsx is None:
+        ok = email_service.try_send_email(
+            to=recipients,
+            subject=f"[Согласовано] {name} — не удалось сформировать файл импорта",
+            html_body=html,
+        )
+        return {"ok": ok, "skipped": False, "recipients": recipients, "error": None if ok else "SMTP/файл"}
+
+    ok = email_service.try_send_email_with_attachment(
+        to=recipients,
+        subject=f"[Согласовано] {name} — файл для импорта в Медиалог",
+        html_body=html,
+        attachment_bytes=xlsx,
+        attachment_filename=f"import_{entity.id[:8]}.xlsx",
+    )
+    if ok:
+        entity.mis_notified_at = datetime.utcnow()
+        db.add(entity)
+        db.commit()
+        logger.info("Письмо МИС отправлено по заявке %s на %s", entity.id, recipients)
+    else:
+        logger.error("SMTP не принял письмо МИС по заявке %s получателям %s", entity.id, recipients)
+    return {"ok": ok, "skipped": False, "recipients": recipients, "error": None if ok else "SMTP"}

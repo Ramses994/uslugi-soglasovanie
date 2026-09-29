@@ -28,7 +28,7 @@ class ServiceRequest(Base):
     __tablename__ = "service_requests"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    request_type = Column(String(32), nullable=False, default="new_service")  # new_service | complex_service | delete | promo
+    request_type = Column(String(32), nullable=False, default="new_service")  # new_service | complex_service | delete | change | promo
     status = Column(Enum(RequestStatus), nullable=False, default=RequestStatus.pending)
 
     initiator_login = Column(String(128), nullable=False)
@@ -48,6 +48,11 @@ class ServiceRequest(Base):
     submission_comment = Column(Text, nullable=True)
     # Увеличивается при каждой повторной отправке после доработки.
     version = Column(Integer, nullable=False, default=1)
+    # Последовательная цепочка: id согласующих по порядку и индекс текущего этапа.
+    approval_chain = Column(JSON, default=list)
+    current_stage_index = Column(Integer, nullable=False, default=0)
+    # Когда ушло письмо с файлом импорта в МИС (ровно один раз на цикл согласования).
+    mis_notified_at = Column(DateTime, nullable=True)
 
 
 class ApprovalHistory(Base):

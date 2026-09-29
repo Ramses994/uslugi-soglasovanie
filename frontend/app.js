@@ -55,6 +55,7 @@ function emptyForm() {
     price_list: "both",
     all_branches: false,
     prices: [],
+    price_undefined: false,
     short_name: "",
     alt_name: "",
     description: "",
@@ -69,6 +70,10 @@ function emptyForm() {
     lab: { erlu_code: "", erlu_name: "", lab_code: "", lab_name: "", direction_name: "", biomaterial_type: "", is_composite: false },
     minzdrav: null,
     business: { service_kind: "", duration_minutes: null, staff_involved: "", equipment: "", consumables: "", medications: "", description: "", comment: "" },
+    included_services: [],
+    change_description: "",
+    affected_branches: [],
+    simple_justification: "",
     approver_ids: [],
     submission_comment: "",
   };
@@ -103,6 +108,7 @@ function app() {
       { value: "new_service", label: "Новая услуга" },
       { value: "complex_service", label: "Комплексная услуга" },
       { value: "delete", label: "Удаление услуги" },
+      { value: "change", label: "Изменение услуги" },
       { value: "promo", label: "Акция" },
     ],
     serviceTypes: [
@@ -138,11 +144,15 @@ function app() {
     expandedId: null,
     requestDetails: {}, // id -> полная карточка заявки (GET /api/requests/{id})
     resubmitComments: {},
+    importPreview: null,
+    importBusy: false,
+    bulkApproverIds: [],
+    AUTO_CHAIN_IDS: ["nfolomova", "osokolovskaya"],
 
     // ---- вкладка «Администрирование» (видна только user.is_admin) ----
     adminApprovers: [],
     adminBranches: [],
-    newApprover: { id: "", name: "", email: "", role: "" },
+    newApprover: { id: "", name: "", email: "", role: "", order: 50 },
     newBranch: { id: "", name: "" },
 
     // ---- подбор согласующего из корпоративного каталога (AD) ----
@@ -152,11 +162,6 @@ function app() {
 
     // ---- инициализация ----
     async init() {
-      this.$watch("form.request_type", (value) => {
-        if (value !== "delete") {
-          this.form.mis_code = "";
-        }
-      });
       try {
         this.user = await api("/api/auth/me");
         await this.loadReferences();
@@ -240,10 +245,23 @@ function app() {
           lab: { ...blank.lab, ...(p.lab || {}) },
           business: { ...blank.business, ...(p.business || {}) },
           prices: p.prices || [],
+          price_undefined: !!p.price_undefined,
+          included_services: p.included_services || [],
+          change_description: p.change_description || "",
+          affected_branches: p.affected_branches || [],
+          simple_justification: p.simple_justification || "",
           approver_ids: p.approver_ids || [],
           mis_code: p.mis_code || "",
+          date_start: (p.date_start || "").toString().slice(0, 10),
+          date_end: (p.date_end || "").toString().slice(0, 10),
           submission_comment: detail.submission_comment || p.submission_comment || "",
         };
+        this.erluQuery = (this.form.lab && this.form.lab.erlu_name) || "";
+        this.minzdravQuery = "";
+        if (this.form.all_branches && this.form.prices.length) {
+          this.uniformPrice = this.form.prices[0].price;
+        }
+        this.showOptional = !!(p.short_name || p.description || p.date_start || p.sex_limit && p.sex_limit !== "all");
         this.editingId = r.id;
         this.submitted = false;
         this.showBusiness = true;
@@ -341,8 +359,8 @@ function app() {
         return;
       }
       try {
-        await api("/api/admin/approvers", { method: "POST", body: JSON.stringify({ ...this.newApprover, required_for: ["all"] }) });
-        this.newApprover = { id: "", name: "", email: "", role: "" };
+        await api("/api/admin/approvers", { method: "POST", body: JSON.stringify({ ...this.newApprover, required_for: ["all"], order: this.newApprover.order || 50 }) });
+        this.newApprover = { id: "", name: "", email: "", role: "", order: 50 };
         this.directoryQuery = "";
         this.directoryResults = [];
         await this.loadAdmin();
@@ -536,35 +554,51 @@ function app() {
 
     // ---- отправка ----
     async submitRequest() {
-      if (!this.form.prices.length) {
-        this.notify("error", "Не хватает данных", "Укажите хотя бы одну цену по филиалу.");
+      const simplified = ["delete", "change"].includes(this.form.request_type);
+      if (!simplified && !this.form.price_undefined && !this.form.prices.length) {
+        this.notify("error", "Не хватает данных", "Укажите цены по филиалам или отметьте «Цена не определена».");
         return;
       }
-      if (!this.form.approver_ids.length) {
-        this.notify("error", "Не хватает данных", "Выберите хотя бы одного согласующего.");
-        return;
-      }
-      if (!(this.form.business && (this.form.business.description || "").trim())) {
+      if (!simplified && !(this.form.business && (this.form.business.description || "").trim())) {
         this.notify("error", "Не хватает данных", "Укажите деловое обоснование (суть услуги).");
         this.showBusiness = true;
         return;
       }
-      if (this.form.request_type === "delete" && !(this.form.mis_code || "").trim()) {
-        this.notify("error", "Не хватает данных", "Укажите код услуги в МИС Медиалог — он обязателен при удалении услуги.");
+      if (simplified && !(this.form.mis_code || "").trim()) {
+        this.notify("error", "Не хватает данных", "Укажите код услуги в МИС Медиалог.");
+        return;
+      }
+      if (simplified && !this.form.affected_branches.length) {
+        this.notify("error", "Не хватает данных", "Укажите хотя бы один филиал.");
+        return;
+      }
+      if (simplified && !(this.form.simple_justification || "").trim()) {
+        this.notify("error", "Не хватает данных", "Укажите обоснование.");
+        return;
+      }
+      if (this.form.request_type === "change" && !(this.form.change_description || "").trim()) {
+        this.notify("error", "Не хватает данных", "Укажите, что именно меняется в услуге.");
+        return;
+      }
+      if (this.form.request_type === "complex_service" && !(this.form.included_services || []).some((s) => (s.name || "").trim())) {
+        this.notify("error", "Не хватает данных", "Добавьте хотя бы одну услугу в состав комплекса.");
         return;
       }
       this.loading = true;
       try {
         const payload = JSON.parse(JSON.stringify(this.form));
         if (!payload.is_lab_service) payload.lab = null;
+        else if (this.erluQuery && !payload.lab.erlu_name) payload.lab.erlu_name = this.erluQuery;
         if (!payload.date_start) payload.date_start = null;
         if (!payload.date_end) payload.date_end = null;
         if (!payload.mis_code) payload.mis_code = null;
+        payload.included_services = (payload.included_services || []).filter((s) => (s.name || "").trim());
         if (this.editingId) {
           await api(`/api/requests/${this.editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
           this.notify("success", "Изменения сохранены", "Карточка заявки обновлена.");
           this.editingId = null;
           this.form = emptyForm();
+          this.erluQuery = "";
           this.activeTab = "my";
           await this.loadMyRequests();
         } else {
@@ -585,6 +619,84 @@ function app() {
       this.uniformPrice = null;
       this.submitted = false;
       this.submittedId = null;
+      this.erluQuery = "";
+      this.importPreview = null;
+    },
+
+    selectableApprovers() {
+      return (this.approvers || []).filter((a) => !this.AUTO_CHAIN_IDS.includes(a.id));
+    },
+    toggleAffectedBranch(name) {
+      const cur = this.form.affected_branches || [];
+      if (cur.includes(name)) this.form.affected_branches = cur.filter((x) => x !== name);
+      else this.form.affected_branches = [...cur, name];
+    },
+    async downloadTemplate() {
+      try {
+        const res = await fetch(API_BASE + "/api/requests/template.xlsx", { credentials: "include" });
+        if (!res.ok) throw new Error("Не удалось скачать шаблон");
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "service_requests_template.xlsx";
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        this.notify("error", "Шаблон Excel", e.message);
+      }
+    },
+    async onExcelFile(ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = "";
+      if (!file) return;
+      this.importBusy = true;
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch(API_BASE + "/api/requests/import-preview", { credentials: "include", method: "POST", body: fd });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(formatApiErrorDetail(body.detail) || "Ошибка разбора файла");
+        this.importPreview = (body.results || []).map((row) => ({
+          ...row,
+          selected: !(row.errors && row.errors.length),
+        }));
+        this.bulkApproverIds = [];
+        this.notify("success", "Файл разобран", "Проверьте строки и отправьте выбранные на согласование.");
+      } catch (e) {
+        this.notify("error", "Импорт Excel", e.message);
+      } finally {
+        this.importBusy = false;
+      }
+    },
+    async submitBulk() {
+      const rows = (this.importPreview || []).filter((r) => r.selected && !(r.errors && r.errors.length));
+      if (!rows.length) {
+        this.notify("error", "Нечего отправлять", "Отметьте валидные строки.");
+        return;
+      }
+      this.importBusy = true;
+      try {
+        const res = await api("/api/requests/bulk", {
+          method: "POST",
+          body: JSON.stringify({
+            items: rows.map((r) => r.data),
+            approver_ids: this.bulkApproverIds,
+          }),
+        });
+        this.notify(
+          "success",
+          "Массовая отправка",
+          `Создано: ${res.created.length}. Ошибок: ${res.errors.length}.`,
+        );
+        this.importPreview = null;
+        this.activeTab = "my";
+        await this.loadMyRequests();
+      } catch (e) {
+        this.notify("error", "Массовая отправка", e.message);
+      } finally {
+        this.importBusy = false;
+      }
     },
   };
 }

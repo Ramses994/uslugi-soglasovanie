@@ -6,12 +6,19 @@ Depends(require_admin) — обычный сотрудник получит 403.
 Роль назначается через список логинов в .env (FORM_ADMIN_LOGINS) — см.
 config.Settings.admin_logins() и комментарий там же про AD-группу для прода.
 """
+import json
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ..auth.ldap_auth import search_directory, LdapAuthError
 from ..config import get_settings
+from ..database import get_db
+from ..models import ServiceRequest
 from ..services import admin_store
+from ..services.mis_notify import send_mis_import_email
 from .auth import require_admin
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -24,6 +31,7 @@ class ApproverIn(BaseModel):
     email: str
     role: str
     required_for: list[str] = ["all"]
+    order: int = 50
 
 
 class BranchIn(BaseModel):
@@ -114,3 +122,25 @@ def delete_branch(branch_id: str, user=Depends(require_admin)):
         admin_store.delete_item(settings.branches_json, branch_id)
     except KeyError:
         raise HTTPException(404, "Филиал не найден")
+
+
+@router.post("/requests/{request_id}/notify-mis")
+def notify_mis_import(
+    request_id: str,
+    force: bool = Query(False, description="Повторно отправить, даже если письмо уже уходило"),
+    db: Session = Depends(get_db),
+    user=Depends(require_admin),
+):
+    """Дослать файл импорта в МИС по уже согласованной заявке без пересоздания."""
+    entity = db.get(ServiceRequest, request_id)
+    if not entity:
+        raise HTTPException(404, "Заявка не найдена")
+    path = Path(settings.approvers_json)
+    items = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    approvers_map = {a["id"]: a for a in items}
+    result = send_mis_import_email(db, entity, approvers_map, force=force)
+    if result.get("skipped") and result.get("error"):
+        raise HTTPException(400, result["error"])
+    if not result.get("ok"):
+        raise HTTPException(502, result.get("error") or "Не удалось отправить письмо в МИС")
+    return result

@@ -71,6 +71,11 @@ class MinzdravMatch(BaseModel):
     manual_override: bool = False
 
 
+class IncludedService(BaseModel):
+    name: str = ""
+    code: Optional[str] = None
+
+
 class BusinessJustification(BaseModel):
     """Деловое обоснование — перенесено из старой формы Excel
     (лист 'Внесение новой услуги'), чтобы согласующие видели не только
@@ -87,15 +92,20 @@ class BusinessJustification(BaseModel):
 
 class ServiceRequestIn(BaseModel):
     # --- служебные / деловые ---
-    request_type: str = Field("new_service", description="new_service | complex_service | delete | promo")
+    request_type: str = Field("new_service", description="new_service | complex_service | delete | change | promo")
     business: Optional[BusinessJustification] = None
+    change_description: Optional[str] = None
+    affected_branches: list[str] = Field(default_factory=list)
+    simple_justification: Optional[str] = None
+    included_services: list[IncludedService] = Field(default_factory=list)
+    price_undefined: bool = False
 
     # --- обязательные поля карточки услуги МИС ---
     name: str = Field(..., min_length=3, max_length=255, description="Наименование (как в МИС)")
     mis_code: Optional[str] = Field(None, max_length=64, description="Код услуги в МИС Медиалог (поле CODE при импорте)")
-    service_type: ServiceType
+    service_type: ServiceType = ServiceType.simple
     price_list: PriceListType = PriceListType.both
-    prices: list[BranchPrice] = Field(..., min_length=1)
+    prices: list[BranchPrice] = Field(default_factory=list)
     all_branches: bool = False
 
     # --- опциональные поля карточки услуги ---
@@ -145,30 +155,44 @@ class ServiceRequestIn(BaseModel):
     # не поле карточки услуги МИС). В payload JSON не кладём — иначе дублируется.
     submission_comment: Optional[str] = Field(None, description="Комментарий инициатора для согласующих")
 
-    @field_validator("submission_comment", mode="before")
+    @field_validator("submission_comment", "change_description", "simple_justification", mode="before")
     @classmethod
-    def _blank_submission_comment_to_none(cls, v):
+    def _blank_text_to_none(cls, v):
         if isinstance(v, str) and not v.strip():
             return None
         return v
 
     # --- маршрутизация согласования ---
-    approver_ids: list[str] = Field(..., min_length=1)
+    # Фоломова и Соколовская добавляются в цепочку на бэкенде всегда;
+    # здесь — только «середина», выбранная инициатором (может быть пустой).
+    approver_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_lab_block(self):
+        simplified = self.request_type in ("delete", "change")
         if self.is_lab_service and self.lab is None:
             raise ValueError("Для лабораторной услуги обязателен блок 'lab' (ЕРЛУ-КДЛ)")
         if self.age_from is not None and self.age_to is not None and self.age_from > self.age_to:
             raise ValueError("'age_from' не может быть больше 'age_to'")
-        # Деловое обоснование — вложенный объект business (не плоская строка).
-        # Обязательна «суть услуги» (description): без неё согласующие не видят,
-        # зачем услуга нужна, и заявка не должна уходить на согласование.
-        desc = (self.business.description if self.business else None) or ""
-        if not str(desc).strip():
-            raise ValueError("Укажите деловое обоснование (суть услуги)")
-        if self.request_type == "delete" and not (self.mis_code and str(self.mis_code).strip()):
-            raise ValueError("Код услуги в МИС Медиалог обязателен при удалении услуги")
+        if not simplified:
+            if not self.price_undefined and not self.all_branches and not self.prices:
+                raise ValueError("Укажите цены по филиалам или отметьте «Цена не определена»")
+            desc = (self.business.description if self.business else None) or ""
+            if not str(desc).strip():
+                raise ValueError("Укажите деловое обоснование (суть услуги)")
+        if simplified:
+            if not (self.mis_code and str(self.mis_code).strip()):
+                raise ValueError("Код услуги в МИС обязателен")
+            if not self.affected_branches:
+                raise ValueError("Укажите хотя бы один филиал")
+            if not (self.simple_justification and str(self.simple_justification).strip()):
+                raise ValueError("Укажите обоснование")
+        if self.request_type == "change" and not (self.change_description and str(self.change_description).strip()):
+            raise ValueError("Укажите, что именно меняется в услуге")
+        if self.request_type == "complex_service":
+            named = [s for s in self.included_services if (s.name or "").strip()]
+            if not named:
+                raise ValueError("Укажите хотя бы одну услугу в составе комплекса")
         return self
 
 
