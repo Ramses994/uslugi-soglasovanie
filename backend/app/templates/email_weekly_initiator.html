@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f2f4f7;font-family:Segoe UI, Arial, sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;">
+        <tr><td style="background:#0f3d73;padding:20px 28px;">
+          <span style="color:#fff;font-size:18px;font-weight:600;">Ваши заявки — отчёт за неделю</span>
+        </td></tr>
+        <tr><td style="padding:24px 28px;font-size:14px;color:#1a1a1a;">
+          <p style="margin:0 0 12px 0;">Здравствуйте, {{ initiator_name }}!</p>
+
+          <h3 style="margin:12px 0 8px 0;">На согласовании</h3>
+          {% if pending %}
+          <ul style="padding-left:18px;margin:0 0 16px 0;">
+            {% for r in pending %}
+            <li style="margin-bottom:8px;">
+              <b>{{ r.name }}</b> (№{{ r.id[:8] }})<br>
+              {{ r.stage_label }}{% if r.waiting_working_days %}; ждёт {{ r.waiting_working_days }} раб. дн.{% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p style="margin:0 0 16px 0;color:#64748b;">Сейчас нет заявок на согласовании.</p>
+          {% endif %}
+
+          <h3 style="margin:12px 0 8px 0;">Решено за неделю</h3>
+          {% if resolved_week %}
+          <ul style="padding-left:18px;margin:0;">
+            {% for r in resolved_week %}
+            <li style="margin-bottom:8px;">
+              <b>{{ r.name }}</b> (№{{ r.id[:8] }}) — {{ r.stage_label }}
+            </li>
+            {% endfor %}
+          </ul>
+          {% else %}
+          <p style="margin:0;color:#64748b;">За неделю решений по вашим заявкам не было.</p>
+          {% endif %}
+          <p style="margin:16px 0 0 0;"><a href="{{ app_url }}" style="color:#0f3d73;">Открыть форму</a></p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

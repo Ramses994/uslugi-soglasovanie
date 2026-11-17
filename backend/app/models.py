@@ -53,6 +53,25 @@ class ServiceRequest(Base):
     current_stage_index = Column(Integer, nullable=False, default=0)
     # Когда ушло письмо с файлом импорта в МИС (ровно один раз на цикл согласования).
     mis_notified_at = Column(DateTime, nullable=True)
+    generated_mis_code = Column(String(32), nullable=True)
+
+
+class MisCodeCounter(Base):
+    """Счётчик CODE для новых услуг, у которых в заявке ещё нет кода МИС."""
+    __tablename__ = "mis_code_counter"
+
+    id = Column(Integer, primary_key=True)
+    next_value = Column(Integer, nullable=False, default=11603)
+
+
+class ReportRun(Base):
+    """Идемпотентность еженедельных отчётов: один kind+period_key = одно письмо."""
+    __tablename__ = "report_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(64), nullable=False, index=True)
+    period_key = Column(String(32), nullable=False, index=True)
+    sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ApprovalHistory(Base):

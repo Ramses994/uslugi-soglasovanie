@@ -212,6 +212,17 @@ class ResubmitIn(BaseModel):
         return v
 
 
+class SkipStageIn(BaseModel):
+    comment: str = Field(..., min_length=3, description="Обязательная причина пропуска этапа")
+
+    @field_validator("comment", mode="before")
+    @classmethod
+    def _strip_comment(cls, v):
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
+
 class ApprovalHistoryOut(BaseModel):
     id: int
     approver_id: Optional[str] = None

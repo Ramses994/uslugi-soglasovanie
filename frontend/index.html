@@ -183,13 +183,16 @@
                         :class="statusBadgeClass(r.status)"
                         x-text="statusLabel(r.status)"></span>
                 </div>
+                <p class="text-xs text-slate-600 mt-1" x-show="r.stage_label" x-text="r.stage_label"></p>
 
                 <div class="mt-3 flex flex-wrap gap-2">
                   <template x-for="a in r.approvals" :key="a.approver_id">
                     <span class="inline-flex items-center gap-1 text-xs rounded-full border px-2 py-1"
-                          :class="approvalChipClass(a.decision)">
+                          :class="approvalChipClass(a.decision, r, a.approver_id)"
+                          :title="a.decision === 'skipped' ? ('Пропущено админом' + (a.decided_by ? ': ' + a.decided_by : '')) : ''">
                       <span x-text="approverName(a.approver_id)"></span>
-                      <span x-text="approvalChipMark(a.decision)"></span>
+                      <span x-show="a.decision === 'skipped'">Пропущено (админ)</span>
+                      <span x-show="a.decision !== 'skipped'" x-text="approvalChipMark(a.decision)"></span>
                     </span>
                   </template>
                 </div>
@@ -198,6 +201,9 @@
                   <button type="button" class="text-sm text-blue-600 hover:underline"
                           x-show="canEditRequest(r)"
                           @click="editRequest(r)">Редактировать</button>
+                  <button type="button" class="text-sm text-amber-700 hover:underline"
+                          x-show="canSkipStage(r)"
+                          @click="skipStage(r)">Пропустить этот этап</button>
                   <button type="button" class="text-sm text-red-500 hover:underline"
                           x-show="user.is_admin"
                           @click="deleteRequest(r.id)">Удалить</button>
@@ -473,14 +479,25 @@
                 </template>
               </select>
             </div>
-            <!-- Прейскурант временно скрыт; значение both уходит с формы по умолчанию. Вернуть — убрать x-show="false". -->
+            <!-- Прейскурант скрыт: по умолчанию только ДМС (как в реальной выгрузке МИС). Вернуть — убрать x-show="false". -->
             <div x-show="false" style="display: none;" aria-hidden="true">
               <label class="field-label">Прейскурант</label>
               <select class="input" x-model="form.price_list">
-                <option value="both">ОМС и ДМС</option>
                 <option value="dms">ДМС</option>
+                <option value="both">ОМС и ДМС</option>
                 <option value="oms">ОМС</option>
               </select>
+            </div>
+
+            <div class="mb-4" x-show="!['delete','change'].includes(form.request_type)">
+              <label class="field-label">Группа услуг в МИС (SERVGRP_CODE)</label>
+              <select class="input" x-model="form.service_group">
+                <option value="">— не задана (заполнит администратор МИС при импорте) —</option>
+                <template x-for="g in serviceGroups" :key="g.id || g.code">
+                  <option :value="g.code" x-text="g.name || g.code"></option>
+                </template>
+              </select>
+              <p class="text-xs text-slate-400 mt-1">Коды из справочника «Группы услуг». Список неполный — его можно дополнить в data/service_groups.json.</p>
             </div>
 
             <!-- Признак лаборатории -->
@@ -784,6 +801,6 @@
   </template>
 </div>
 
-<script src="app.js?v=10"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>

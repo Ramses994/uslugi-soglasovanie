@@ -52,7 +52,7 @@ function emptyForm() {
     name: "",
     mis_code: "",
     service_type: "simple",
-    price_list: "both",
+    price_list: "dms",
     all_branches: false,
     prices: [],
     price_undefined: false,
@@ -74,6 +74,7 @@ function emptyForm() {
     change_description: "",
     affected_branches: [],
     simple_justification: "",
+    service_group: "",
     approver_ids: [],
     submission_comment: "",
   };
@@ -104,6 +105,7 @@ function app() {
     editingId: null,
     branches: [],
     approvers: [],
+    serviceGroups: [],
     requestTypes: [
       { value: "new_service", label: "Новая услуга" },
       { value: "complex_service", label: "Комплексная услуга" },
@@ -287,14 +289,21 @@ function app() {
       const a = this.approvers.find((x) => x.id === approverId);
       return a ? a.name : approverId;
     },
-    approvalChipClass(decision) {
+    approvalChipClass(decision, request, approverId) {
       if (decision === "approve") return "border-green-200 bg-green-50 text-green-700";
+      if (decision === "skipped") return "border-slate-300 bg-slate-100 text-slate-600";
       if (decision === "reject") return "border-red-200 bg-red-50 text-red-700";
       if (decision === "rework") return "border-amber-200 bg-amber-50 text-amber-700";
-      return "border-slate-200 bg-slate-50 text-slate-500";
+      const current = request && (request.stage_summary?.current_approver_id
+        || (request.approval_chain || [])[request.current_stage_index || 0]);
+      if (request && request.status === "pending" && approverId && approverId === current) {
+        return "border-amber-300 bg-amber-50 text-amber-800 ring-1 ring-amber-200";
+      }
+      return "border-slate-200 bg-slate-50 text-slate-400";
     },
     approvalChipMark(decision) {
       if (decision === "approve") return "✔";
+      if (decision === "skipped") return "⊘";
       if (decision === "reject") return "✕";
       if (decision === "rework") return "↶";
       return "…";
@@ -302,6 +311,7 @@ function app() {
     historyDecisionLabel(decision) {
       return {
         approve: "Согласовано",
+        skipped: "Пропущено (админ)",
         reject: "Отклонено",
         rework: "На доработку",
         resubmit: "Повторная отправка",
@@ -310,10 +320,35 @@ function app() {
     historyDecisionClass(decision) {
       return {
         approve: "bg-green-50 text-green-700",
+        skipped: "bg-slate-100 text-slate-600",
         reject: "bg-red-50 text-red-700",
         rework: "bg-amber-50 text-amber-700",
         resubmit: "bg-blue-50 text-blue-700",
       }[decision] || "bg-slate-100 text-slate-600";
+    },
+    canSkipStage(r) {
+      return !!(this.user?.is_admin && r && r.status === "pending" && (r.approval_chain || []).length);
+    },
+    async skipStage(r) {
+      const comment = window.prompt("Причина пропуска текущего этапа (обязательно):", "Согласующий в отпуске");
+      if (comment === null) return;
+      if (!String(comment).trim() || String(comment).trim().length < 3) {
+        this.notify("error", "Нужна причина", "Укажите комментарий не короче 3 символов.");
+        return;
+      }
+      try {
+        await api(`/api/requests/${r.id}/skip-stage`, {
+          method: "POST",
+          body: JSON.stringify({ comment: String(comment).trim() }),
+        });
+        this.notify("success", "Этап пропущен", "Цепочка сдвинута дальше.");
+        await this.loadMyRequests();
+        if (this.expandedId === r.id) {
+          this.requestDetails[r.id] = await api(`/api/requests/${r.id}`);
+        }
+      } catch (e) {
+        this.notify("error", "Не удалось пропустить этап", e.message);
+      }
     },
 
     statusLabel(status) {
@@ -431,9 +466,10 @@ function app() {
     },
 
     async loadReferences() {
-      [this.branches, this.approvers] = await Promise.all([
+      [this.branches, this.approvers, this.serviceGroups] = await Promise.all([
         api("/api/dictionaries/branches"),
         api("/api/dictionaries/approvers"),
+        api("/api/dictionaries/service-groups").catch(() => []),
       ]);
     },
 

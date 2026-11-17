@@ -1,0 +1,12 @@
+[Unit]
+Description=Еженедельный отчёт формы согласования услуг
+StartLimitIntervalSec=7200
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/administrator/uslugi-soglasovanie
+# Сервер в UTC; письмо уходит через SMTP внутри контейнера приложения.
+ExecStart=/usr/bin/docker compose -f /home/administrator/uslugi-soglasovanie/docker-compose.yml exec -T -e PYTHONPATH=/app/backend -w /app uslugi-soglasovanie python -m app.cli weekly-reports
+Restart=on-failure
+RestartSec=300

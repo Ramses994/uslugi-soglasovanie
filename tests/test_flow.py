@@ -143,11 +143,17 @@ class TestApprovalFlow:
         ws = wb.active
         header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
         assert header[:3] == ["CODE", "INSURANCE_TYPE", "LABEL"]
+        assert "EXAM_GR_CODE" in header
+        assert header[-1] == "MODELS_CODE"
+        assert "Импорт прейскурантов" in wb.sheetnames
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         # 2 филиала x (ДМС+ОМС, т.к. price_list='both') = 4 строки
         assert len(rows) == 4
+        assert all(row[0] for row in rows)
         assert all(row[2] == "Приём врача-терапевта повторный" for row in rows)
-        assert all(row[19] == "B01.047.002" for row in rows)  # MINZDRAV_CODE
+        assert all(row[6] == "НДС-0" for row in rows)
+        assert all(row[7] == "000" for row in rows)
+        assert all(row[18] == "B01.047.002" for row in rows)  # MINZDRAV_CODE
 
     def test_repeat_click_on_same_link_is_idempotent(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
@@ -889,5 +895,257 @@ class TestExcelImportBulk:
         assert bulk.status_code == 200, bulk.text
         assert len(bulk.json()["created"]) == 1
         assert bulk.json()["errors"] == []
+
+
+class TestMedialogExport12:
+    def _req(self, **overrides):
+        from app.schemas import ServiceRequestIn
+        payload = {
+            **SAMPLE_REQUEST_PAYLOAD,
+            "price_list": "dms",
+            "all_branches": False,
+            "prices": [{"branch": "Куркино", "price": 1500}, {"branch": "Каширка", "price": 1500}],
+            "mis_code": "90001",
+            "short_name": "",
+            **overrides,
+        }
+        return ServiceRequestIn.model_validate(payload)
+
+    def _wb(self, req):
+        from app.services.medialog_export import build_import_workbook
+        return openpyxl.load_workbook(io.BytesIO(build_import_workbook(req, generated_code_hint=req.mis_code or "90001")))
+
+    def test_serv_and_price_sheets_share_code(self):
+        from app.services.medialog_export import PRICE_COLUMNS, SERV_COLUMNS
+        req = self._req()
+        wb = self._wb(req)
+        assert [c.value for c in next(wb["Импорт услуг"].iter_rows(min_row=1, max_row=1))] == SERV_COLUMNS
+        assert [c.value for c in next(wb["Импорт прейскурантов"].iter_rows(min_row=1, max_row=1))] == PRICE_COLUMNS
+        serv_rows = list(wb["Импорт услуг"].iter_rows(min_row=2, values_only=True))
+        price_rows = list(wb["Импорт прейскурантов"].iter_rows(min_row=2, values_only=True))
+        assert {r[0] for r in serv_rows} == {"90001"}
+        assert {r[0] for r in price_rows} == {"90001"}
+        assert len(price_rows) == 2
+        assert all(r[1] == 1500 for r in price_rows)
+
+    def test_serv_ext_type_mapping(self):
+        from app.services.medialog_export import serv_ext_type
+        expected = {
+            "simple": "S", "complex": "D", "combined": "P", "program": "C", "package": "X", "prn": "S",
+        }
+        for value, code in expected.items():
+            extra = {}
+            if value == "combined":
+                extra["request_type"] = "complex_service"
+                extra["included_services"] = [{"name": "Приём", "code": "1"}]
+            req = self._req(service_type=value, **extra)
+            assert serv_ext_type(req) == code
+            row = list(self._wb(req)["Импорт услуг"].iter_rows(min_row=2, max_row=2, values_only=True))[0]
+            assert row[11] == code
+
+    def test_short_label_filled_and_trimmed(self):
+        from app.services.medialog_export import SHORT_LABEL_MAX, make_short_label
+        long_name = ("Комплексный анализ крови на аминокислоты сорок восемь показателей ВЭЖХ-МС " * 4)[:255]
+        assert make_short_label("Bio-Oss") == "Bio-Oss"
+        short = make_short_label(long_name)
+        assert short
+        assert len(short) <= SHORT_LABEL_MAX
+        assert "…" not in short
+        req = self._req(name=long_name, short_name=None)
+        row = list(self._wb(req)["Импорт услуг"].iter_rows(min_row=2, max_row=2, values_only=True))[0]
+        assert row[3] == short
+
+    def test_description_from_business_justification(self):
+        req = self._req(
+            description=None,
+            simple_justification=None,
+            business={**SAMPLE_REQUEST_PAYLOAD["business"], "description": "Обоснование из заявки для МИС"},
+        )
+        row = list(self._wb(req)["Импорт услуг"].iter_rows(min_row=2, max_row=2, values_only=True))[0]
+        assert row[4] == "Обоснование из заявки для МИС"
+
+    def test_defaults_taxe_dep_exam_text_and_cyrillic_minzdrav(self):
+        req = self._req(minzdrav={"code": "A03.26.009", "name": "Офтальмометрия"})
+        ws = self._wb(req)["Импорт услуг"]
+        row = list(ws.iter_rows(min_row=2, max_row=2, values_only=True))[0]
+        assert row[6] == "НДС-0"
+        assert row[7] == "000"
+        assert row[16] == "Куркино"
+        assert row[18].startswith("А")
+        exam_cell = ws.cell(2, 20)
+        assert exam_cell.value in (None, "")
+        assert exam_cell.number_format == "@"
+
+    def test_regression_payloads_from_production_cases(self):
+        cases = [
+            {"name": "Остеопатический материал Bio-Oss 1гр.", "prices": [{"branch": "Куркино", "price": 22000}]},
+            {"name": "Экспресс-тест на ОРВИ (5 инфекций)", "prices": [{"branch": "Куркино", "price": 1900}]},
+            {"name": "Комплексный анализ крови на аминокислоты (48 показателей), ВЭЖХ-МС", "prices": [{"branch": "Куркино", "price": 12000}]},
+            {"name": "Стероидный профиль крови, ВЭЖХ-МС", "prices": [{"branch": "Куркино", "price": 1}]},
+            {"name": "Комплексный анализ крови на аминокислоты (12 показателей), ВЭЖХ-МС", "prices": [{"branch": "Куркино", "price": 5000}]},
+        ]
+        for case in cases:
+            req = self._req(mis_code="11000", **case)
+            wb = self._wb(req)
+            serv = list(wb["Импорт услуг"].iter_rows(min_row=2, values_only=True))
+            prices = list(wb["Импорт прейскурантов"].iter_rows(min_row=2, values_only=True))
+            assert serv and prices
+            assert all(r[0] == "11000" for r in serv)
+            assert all(r[0] == "11000" for r in prices)
+            assert all(r[1] == "D" for r in serv)
+            assert serv[0][2] == case["name"]
+
+
+class TestSkipStageAndReports:
+    def test_admin_skips_middle_stage_and_notifies(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        before = len(logged_in_client.sent_emails)
+        r = logged_in_client.post(
+            f"/api/requests/{rid}/skip-stage",
+            json={"comment": "Фоломова уже согласовала, Камаев в отпуске"},
+        )
+        assert r.status_code == 200, r.text
+        detail = logged_in_client.get(f"/api/requests/{rid}").json()
+        assert detail["status"] == "pending"
+        by_id = {a["approver_id"]: a for a in detail["approvals"]}
+        assert by_id["chief_doctor"]["decision"] == "skipped"
+        assert by_id["chief_doctor"]["decided_by"] == "ivanov"
+        assert "osokolovskaya" in detail["stage_label"].lower() or detail["stage_summary"]["current_approver_id"] == "osokolovskaya"
+        assert len(logged_in_client.sent_emails) > before
+        skip_mails = [m for m in logged_in_client.sent_emails[before:] if "Пропуск этапа" in m["subject"]]
+        assert skip_mails
+        assert any("отпуске" in m["html_body"] for m in skip_mails)
+        # инициатор + админы формы (не только следующий согласующий)
+        skip_recipients = set()
+        for m in skip_mails:
+            skip_recipients.update(m["to"] if isinstance(m["to"], (list, tuple)) else [m["to"]])
+        assert "ivanov@clinic.local" in skip_recipients
+        next_mails = [m for m in logged_in_client.sent_emails[before:] if "требуется решение" in m["subject"].lower()]
+        assert next_mails  # письмо следующему согласующему — отдельно от уведомления о пропуске
+
+    def test_non_admin_cannot_skip_stage(self, client):
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        _add_chain_anchors(client)
+        rid = client.post("/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}).json()["id"]
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        assert client.post(f"/api/requests/{rid}/skip-stage", json={"comment": "нет прав"}).status_code == 403
+
+    def test_skip_last_stage_sends_mis_mail_once(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        _approve_as(logged_in_client, "nfolomova@clinic.local")
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        attachments_before = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert attachments_before == []
+        r = logged_in_client.post(
+            f"/api/requests/{rid}/skip-stage",
+            json={"comment": "Соколовская в отпуске, пропускаем финальный этап"},
+        )
+        assert r.status_code == 200, r.text
+        detail = logged_in_client.get(f"/api/requests/{rid}").json()
+        assert detail["status"] == "approved"
+        assert detail["mis_notified_at"]
+        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
+        assert len(attachments) == 1
+        # повторный skip на approved запрещён
+        assert logged_in_client.post(
+            f"/api/requests/{rid}/skip-stage", json={"comment": "ещё раз"}
+        ).status_code == 400
+
+    def test_stage_label_in_list(self, logged_in_client):
+        _add_chain_anchors(logged_in_client)
+        logged_in_client.post("/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]})
+        items = logged_in_client.get("/api/requests").json()
+        assert items
+        assert "этап" in (items[0].get("stage_label") or "").lower()
+        assert items[0]["stage_summary"]["current_approver_id"] == "nfolomova"
+
+    def test_admin_report_marks_stuck_by_working_days(self, logged_in_client):
+        from datetime import datetime, timedelta
+        from app.database import get_db
+        from app.main import app as fastapi_app
+        from app.models import ServiceRequest
+        from app.services.weekly_reports import build_admin_report
+
+        _add_chain_anchors(logged_in_client)
+        rid = logged_in_client.post(
+            "/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]}
+        ).json()["id"]
+        gen = fastapi_app.dependency_overrides[get_db]()
+        db = next(gen)
+        row = db.get(ServiceRequest, rid)
+        row.created_at = datetime(2026, 11, 9, 10, 0, 0)  # понедельник
+        db.add(row)
+        db.commit()
+        now = datetime(2026, 11, 13, 10, 0, 0)  # пятница — 4 рабочих дня после пн
+        report = build_admin_report(db, now=now, stuck_days=3)
+        db.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+        assert any(r["id"] == rid and r["stuck"] for r in report["pending"])
+        assert report["stuck"]
+
+    def test_initiator_report_is_personal(self, client):
+        from app.database import get_db
+        from app.main import app as fastapi_app
+        from app.services.weekly_reports import build_initiator_reports
+
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        _add_chain_anchors(client)
+        client.post("/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"]})
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        client.post("/api/requests", json={**SAMPLE_REQUEST_PAYLOAD, "approver_ids": ["chief_doctor"], "name": "Услуга Петровой"})
+        gen = fastapi_app.dependency_overrides[get_db]()
+        db = next(gen)
+        reports = build_initiator_reports(db)
+        db.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+        assert "ivanov@clinic.local" in reports
+        assert "petrova@clinic.local" in reports
+        ivanov_names = {r["name"] for r in reports["ivanov@clinic.local"]["pending"]}
+        petrova_names = {r["name"] for r in reports["petrova@clinic.local"]["pending"]}
+        assert "Услуга Петровой" not in ivanov_names
+        assert "Услуга Петровой" in petrova_names
+
+    def test_weekly_report_idempotent_same_week(self, logged_in_client, monkeypatch):
+        from datetime import datetime
+        from app.database import get_db
+        from app.main import app as fastapi_app
+        from app.services import weekly_reports
+
+        sent = []
+
+        def fake_send(to, subject, html_body, **kwargs):
+            sent.append({"to": to, "subject": subject})
+            return True
+
+        monkeypatch.setattr(weekly_reports, "try_send_email", fake_send)
+        gen = fastapi_app.dependency_overrides[get_db]()
+        db = next(gen)
+        now = datetime(2026, 11, 13, 7, 0, 0)
+        first = weekly_reports.run_friday_reports(db, force=False, now=now)
+        second = weekly_reports.run_friday_reports(db, force=False, now=now)
+        db.close()
+        try:
+            next(gen)
+        except StopIteration:
+            pass
+        assert first["admin"]["skipped"] is False
+        assert second["admin"]["skipped"] is True
+        assert second["initiators"]["skipped"] is True
+
 
 

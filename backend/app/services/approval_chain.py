@@ -77,10 +77,15 @@ def merge_approvals_keeping_approves(
     return out
 
 
+def is_resolved_decision(decision: str | None) -> bool:
+    """Этап закрыт: обычный approve или пропуск админом (skipped)."""
+    return decision in ("approve", "skipped")
+
+
 def first_pending_index(approvals: list[dict], chain: list[str]) -> int:
     by_id = {a["approver_id"]: a for a in (approvals or [])}
     for i, aid in enumerate(chain):
-        if (by_id.get(aid) or {}).get("decision") != "approve":
+        if not is_resolved_decision((by_id.get(aid) or {}).get("decision")):
             return i
     return len(chain)
 
@@ -89,9 +94,30 @@ def next_pending_index(approvals: list[dict], chain: list[str], after_index: int
     by_id = {a["approver_id"]: a for a in (approvals or [])}
     for i in range(after_index + 1, len(chain)):
         aid = chain[i]
-        if (by_id.get(aid) or {}).get("decision") != "approve":
+        if not is_resolved_decision((by_id.get(aid) or {}).get("decision")):
             return i
     return None
+
+
+def apply_chain_progress(entity, approvals: list[dict]) -> None:
+    """После положительного решения (approve/skipped) сдвигает этап или закрывает заявку."""
+    from ..models import RequestStatus
+
+    chain = list(entity.approval_chain or [])
+    if not chain:
+        entity.status = (
+            RequestStatus.approved
+            if approvals and all(is_resolved_decision(a.get("decision")) for a in approvals)
+            else RequestStatus.pending
+        )
+        return
+    nxt = next_pending_index(approvals, chain, int(entity.current_stage_index or 0))
+    if nxt is None:
+        entity.status = RequestStatus.approved
+        entity.current_stage_index = max(len(chain) - 1, 0)
+    else:
+        entity.status = RequestStatus.pending
+        entity.current_stage_index = nxt
 
 
 def current_approver_id(entity) -> str | None:

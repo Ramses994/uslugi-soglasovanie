@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f2f4f7;font-family:Segoe UI, Arial, sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);">
+        <tr><td style="background:#64748b;padding:20px 28px;">
+          <span style="color:#fff;font-size:18px;font-weight:600;">Этап согласования пропущен админом</span>
+        </td></tr>
+        <tr><td style="padding:24px 28px;color:#1a1a1a;font-size:14px;">
+          <p style="margin:0 0 12px 0;">
+            Услуга «<b>{{ service_name }}</b>» (заявка №{{ request_id[:8] }}).
+          </p>
+          <p style="margin:0 0 12px 0;">
+            Администратор <b>{{ admin_name }}</b> пропустил этап согласующего
+            <b>{{ skipped_approver_name }}</b>.
+          </p>
+          <p style="margin:0 0 8px 0;"><b>Причина:</b></p>
+          <p style="margin:0 0 12px 0;padding:12px 14px;border-left:4px solid #64748b;background:#f8fafc;">{{ comment }}</p>
+          <p style="margin:0 0 12px 0;">{{ outcome }}</p>
+          <p style="margin:0;"><a href="{{ app_url }}" style="color:#0f3d73;">Открыть форму согласования</a></p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

@@ -31,10 +31,10 @@ from ..schemas import ServiceRequestIn
 from ..security import read_approval_token
 from ..services.approval_history import record as record_history
 from ..services.approval_chain import (
+    apply_chain_progress,
     current_approver_id,
     load_branch_names,
     needs_folomova_price,
-    next_pending_index,
     notify_approver,
 )
 from ..services.email_service import render_template, try_send_email
@@ -197,16 +197,7 @@ def _apply_decision(ctx: dict, action: str, note: str | None, background_tasks: 
     if action in ("reject", "rework"):
         entity.status = RequestStatus.rework
     else:
-        chain = list(entity.approval_chain or [])
-        nxt = next_pending_index(approvals, chain, int(entity.current_stage_index or 0)) if chain else None
-        if not chain:
-            entity.status = RequestStatus.approved if all(a["decision"] == "approve" for a in approvals) else RequestStatus.pending
-        elif nxt is None:
-            entity.status = RequestStatus.approved
-            entity.current_stage_index = max(len(chain) - 1, 0)
-        else:
-            entity.status = RequestStatus.pending
-            entity.current_stage_index = nxt
+        apply_chain_progress(entity, approvals)
 
     record_history(
         db,

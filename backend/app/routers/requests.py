@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 from io import BytesIO
@@ -11,15 +12,21 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import ServiceRequest, RequestStatus
-from ..schemas import ResubmitIn, ServiceRequestIn, UserProfile
+from ..schemas import ResubmitIn, ServiceRequestIn, SkipStageIn, UserProfile
 from ..services.approval_chain import (
+    apply_chain_progress,
     build_approval_chain,
+    current_approver_id,
     empty_approvals,
     first_pending_index,
     merge_approvals_keeping_approves,
     notify_approver,
 )
 from ..services.approval_history import list_for_request, record as record_history, serialize as serialize_history
+from ..services import email_service
+from ..services.email_service import render_template
+from ..services.mis_notify import mis_recipients, send_mis_import_email
+from ..services.stage_status import stage_summary
 from ..services.xlsx_import import parse_xlsx_requests
 from ..services.xlsx_template import build_template_workbook
 from ..config import get_settings
@@ -132,8 +139,9 @@ def _get_visible_request(db: Session, request_id: str, user: UserProfile) -> Ser
     return row
 
 
-def _list_item(r: ServiceRequest) -> dict:
+def _list_item(r: ServiceRequest, approvers_map: dict | None = None) -> dict:
     payload = r.payload or {}
+    summary = stage_summary(r, approvers_map or {})
     return {
         "id": r.id,
         "name": payload.get("name"),
@@ -146,10 +154,14 @@ def _list_item(r: ServiceRequest) -> dict:
         "version": r.version or 1,
         "approval_chain": r.approval_chain or [],
         "current_stage_index": r.current_stage_index or 0,
+        "stage_label": summary["label"],
+        "stage_summary": summary,
     }
 
 
-def _detail(r: ServiceRequest, db: Session) -> dict:
+def _detail(r: ServiceRequest, db: Session, approvers_map: dict | None = None) -> dict:
+    amap = approvers_map if approvers_map is not None else _load_approvers()
+    summary = stage_summary(r, amap)
     return {
         "id": r.id,
         "status": r.status,
@@ -166,6 +178,8 @@ def _detail(r: ServiceRequest, db: Session) -> dict:
         "approval_chain": r.approval_chain or [],
         "current_stage_index": r.current_stage_index or 0,
         "mis_notified_at": r.mis_notified_at.isoformat() if r.mis_notified_at else None,
+        "stage_label": summary["label"],
+        "stage_summary": summary,
         "history": [serialize_history(h) for h in list_for_request(db, r.id)],
     }
 
@@ -189,7 +203,8 @@ def list_requests(
     if request_type:
         query = query.filter(ServiceRequest.request_type == request_type)
     rows = query.order_by(ServiceRequest.created_at.desc()).limit(200).all()
-    items = [_list_item(r) for r in rows]
+    approvers_map = _load_approvers()
+    items = [_list_item(r, approvers_map) for r in rows]
     needle = (q or "").strip().lower()
     if needle:
         items = [
@@ -336,6 +351,122 @@ def resubmit_request(
         "version": row.version,
         "approval_chain": chain,
         "current_stage_index": idx,
+    }
+
+
+@router.post("/{request_id}/skip-stage")
+def skip_current_stage(
+    request_id: str,
+    body: SkipStageIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(require_admin),
+):
+    """Админ пропускает только текущий этап (не всю цепочку). Дальше — тот же
+    путь, что после обычного approve: следующий согласующий или approved + МИС."""
+    entity = db.get(ServiceRequest, request_id)
+    if not entity:
+        raise HTTPException(404, "Заявка не найдена")
+    if entity.status != RequestStatus.pending:
+        raise HTTPException(400, "Пропуск этапа доступен только для заявок на согласовании")
+
+    approvers_map = _load_approvers()
+    current_id = current_approver_id(entity)
+    if not current_id:
+        raise HTTPException(400, "У заявки нет текущего этапа согласования")
+
+    skipped = approvers_map.get(current_id) or {
+        "id": current_id, "name": current_id, "email": "", "role": "",
+    }
+    approvals = copy.deepcopy(entity.approvals) or []
+    slot = next((a for a in approvals if a.get("approver_id") == current_id), None)
+    if not slot:
+        raise HTTPException(400, "Слот текущего согласующего не найден")
+    if slot.get("decision"):
+        raise HTTPException(400, "По текущему этапу решение уже зафиксировано")
+
+    status_before = entity.status.value
+    slot["decision"] = "skipped"
+    slot["comment"] = body.comment
+    slot["decided_at"] = datetime.utcnow().isoformat()
+    slot["decided_by"] = user.login
+    entity.approvals = approvals
+    apply_chain_progress(entity, approvals)
+    entity.updated_at = datetime.utcnow()
+
+    record_history(
+        db,
+        request_id=entity.id,
+        approver_id=current_id,
+        approver_login=user.login,
+        approver_name=user.display_name,
+        approver_email=user.email,
+        decision="skipped",
+        comment=body.comment,
+        status_before=status_before,
+        status_after=entity.status.value,
+    )
+    db.add(entity)
+    db.commit()
+    db.refresh(entity)
+
+    payload = entity.payload or {}
+    service_name = str(payload.get("name") or "Заявка")
+    req_in = None
+    try:
+        req_in = ServiceRequestIn.model_validate(payload)
+        service_name = req_in.name
+    except Exception:
+        pass
+
+    if entity.status == RequestStatus.approved:
+        outcome = "Заявка полностью согласована (пропущен последний этап)."
+        send_mis_import_email(
+            db, entity, approvers_map,
+            force=False,
+            approver_name=f"{user.display_name} (пропуск этапа)",
+            approver_role="Администратор формы",
+        )
+    else:
+        nxt_id = current_approver_id(entity)
+        nxt_name = (approvers_map.get(nxt_id) or {}).get("name") if nxt_id else None
+        outcome = (
+            f"Заявка передана на следующий этап: {nxt_name}."
+            if nxt_name else "Заявка остаётся на согласовании."
+        )
+        if nxt_id and req_in is not None:
+            background_tasks.add_task(
+                notify_approver,
+                entity.id, entity.initiator_name, entity.initiator_position, entity.initiator_department,
+                entity.initiator_email, req_in, nxt_id, approvers_map,
+                entity.version or 1, entity.submission_comment,
+                bool(payload.get("price_undefined")),
+            )
+
+    notify_to = mis_recipients(entity.initiator_email, approvers_map)
+    html = render_template(
+        "email_skip_stage.html",
+        service_name=service_name,
+        request_id=entity.id,
+        admin_name=user.display_name,
+        skipped_approver_name=skipped.get("name") or current_id,
+        comment=body.comment,
+        outcome=outcome,
+        app_url=settings.app_base_url,
+    )
+    background_tasks.add_task(
+        email_service.try_send_email,
+        notify_to,
+        f"[Пропуск этапа] {service_name}",
+        html,
+    )
+
+    return {
+        "id": entity.id,
+        "status": entity.status,
+        "current_stage_index": entity.current_stage_index,
+        "stage_label": stage_summary(entity, approvers_map)["label"],
+        "skipped_approver_id": current_id,
     }
 
 

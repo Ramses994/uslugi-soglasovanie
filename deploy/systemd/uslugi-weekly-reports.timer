@@ -1,0 +1,12 @@
+[Unit]
+Description=Пятница 10:00 Europe/Moscow — еженедельные отчёты по заявкам
+# Явный TZ в OnCalendar — не зависит от системного часового пояса хоста
+# (сейчас Etc/UTC; если сменят на Europe/Moscow, время отправки не поедет).
+
+[Timer]
+OnCalendar=Fri *-*-* 10:00:00 Europe/Moscow
+Persistent=true
+Unit=uslugi-weekly-reports.service
+
+[Install]
+WantedBy=timers.target

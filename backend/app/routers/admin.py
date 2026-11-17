@@ -37,6 +37,7 @@ class ApproverIn(BaseModel):
 class BranchIn(BaseModel):
     id: str
     name: str
+    mis_org_code: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,12 @@ def delete_approver(approver_id: str, user=Depends(require_admin)):
 # Филиалы
 # ---------------------------------------------------------------------------
 
+def _branch_payload(body: BranchIn) -> dict:
+    data = body.model_dump()
+    data["mis_org_code"] = (data.get("mis_org_code") or data.get("name") or "").strip()
+    return data
+
+
 @router.get("/branches")
 def list_branches(user=Depends(require_admin)):
     return admin_store.list_items(settings.branches_json)
@@ -103,7 +110,7 @@ def list_branches(user=Depends(require_admin)):
 @router.post("/branches", status_code=201)
 def create_branch(body: BranchIn, user=Depends(require_admin)):
     try:
-        return admin_store.add_item(settings.branches_json, body.model_dump())
+        return admin_store.add_item(settings.branches_json, _branch_payload(body))
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
@@ -111,7 +118,7 @@ def create_branch(body: BranchIn, user=Depends(require_admin)):
 @router.put("/branches/{branch_id}")
 def update_branch(branch_id: str, body: BranchIn, user=Depends(require_admin)):
     try:
-        return admin_store.update_item(settings.branches_json, branch_id, body.model_dump())
+        return admin_store.update_item(settings.branches_json, branch_id, _branch_payload(body))
     except KeyError:
         raise HTTPException(404, "Филиал не найден")
 

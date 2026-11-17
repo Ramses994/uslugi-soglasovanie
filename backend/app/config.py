@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     # В реальном контуре список филиалов можно вместо этого подгружать из МИС (таблица
     # FM_DEP / внутренние мед. учреждения) через отдельный read-only коннектор к БД Медиалог.
     branches_json: str = "./data/branches.json"
+    service_groups_json: str = "./data/service_groups.json"
     branches_seed: list[str] = ["Куркино", "Каширка", "Куркино 2 (взр.)"]
 
     database_url: str = "sqlite:///./data/requests.db"
@@ -125,6 +126,8 @@ class Settings(BaseSettings):
     # Явные адреса для письма с файлом импорта в МИС (через запятую). Нужны, когда
     # администратор формы есть в FORM_ADMIN_LOGINS, но его нет в approvers.json.
     mis_notify_emails: str = ""
+    # Порог «застрявшей» заявки для еженедельного отчёта админу (рабочие дни).
+    weekly_report_stuck_working_days: int = 3
 
     @model_validator(mode="after")
     def _resolve_relative_paths(self):
@@ -132,6 +135,7 @@ class Settings(BaseSettings):
         self.dict_minzdrav_path = _resolve_path(self.dict_minzdrav_path)
         self.approvers_json = _resolve_path(self.approvers_json)
         self.branches_json = _resolve_path(self.branches_json)
+        self.service_groups_json = _resolve_path(self.service_groups_json)
         self.database_url = _resolve_sqlite_url(self.database_url)
         return self
 

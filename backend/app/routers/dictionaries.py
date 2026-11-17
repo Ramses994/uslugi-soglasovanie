@@ -61,6 +61,14 @@ def branches(user=Depends(get_current_user)):
     return [b["name"] for b in admin_store.list_items(settings.branches_json)]
 
 
+@router.get("/service-groups")
+def service_groups(user=Depends(get_current_user)):
+    path = Path(settings.service_groups_json)
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 @router.get("/approvers")
 def approvers(user=Depends(get_current_user)):
     path = Path(settings.approvers_json)

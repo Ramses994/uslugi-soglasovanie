@@ -55,3 +55,13 @@ def ensure_schema() -> None:
             conn.execute(text(
                 "ALTER TABLE service_requests ADD COLUMN mis_notified_at DATETIME"
             ))
+        if "generated_mis_code" not in cols:
+            conn.execute(text(
+                "ALTER TABLE service_requests ADD COLUMN generated_mis_code VARCHAR(32)"
+            ))
+    insp = inspect(engine)
+    if "mis_code_counter" in insp.get_table_names():
+        with engine.begin() as conn:
+            n = conn.execute(text("SELECT COUNT(*) FROM mis_code_counter")).scalar() or 0
+            if n == 0:
+                conn.execute(text("INSERT INTO mis_code_counter (id, next_value) VALUES (1, 11603)"))
