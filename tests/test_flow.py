@@ -1208,14 +1208,17 @@ class TestMisDownload14:
         assert sh.nrows == 2  # header + 1 service row
         assert sh.name == "Импорт_услуги"
         code_an_col = headers.index("CODE_AN")
-        exam_col = headers.index("EXAM_GR_CODE")
-        # значения из рабочей выгрузки 11635 (в форме полей пока нет)
-        assert sh.cell_value(1, code_an_col) == "web"
-        assert sh.cell_value(1, headers.index("CODE_AN2")) == "web"
-        assert sh.cell_value(1, headers.index("CODE_AN3")) == "Анализы"
-        assert sh.cell_type(1, code_an_col) == xlrd.XL_CELL_TEXT
-        assert sh.cell_value(1, exam_col) == ""
-        assert sh.cell_type(1, exam_col) in (xlrd.XL_CELL_TEXT, xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK)
+        exam_cols = [headers.index(c) for c in ("EXAM_GR_CODE", "EXAM_CODE", "EXAM_NAME", "EXAM_DUREE", "MODELS_CODE")]
+        # CODE_AN* пустые для любой заявки (не константы web/Анализы из 11635)
+        for col_name in ("CODE_AN", "CODE_AN2", "CODE_AN3"):
+            col = headers.index(col_name)
+            assert sh.cell_value(1, col) == ""
+            assert sh.cell_type(1, col) in (xlrd.XL_CELL_TEXT, xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK)
+        # EXAM_* — пустые текстовые, не boolean
+        for exam_col in exam_cols:
+            assert sh.cell_value(1, exam_col) == ""
+            assert sh.cell_type(1, exam_col) in (xlrd.XL_CELL_TEXT, xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK)
+            assert sh.cell_type(1, exam_col) != xlrd.XL_CELL_BOOLEAN
         # PERIODICAL / PRICE_FOR_CHANGE — числа, как в эталоне
         assert sh.cell_value(1, headers.index("PERIODICAL")) == 0
         assert sh.cell_type(1, headers.index("PERIODICAL")) == xlrd.XL_CELL_NUMBER

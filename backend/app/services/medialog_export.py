@@ -50,11 +50,9 @@ SERV_COLUMNS = [c for c in SERV_FIELDS_COLUMNS if c not in ("NAME_ALTER", "CODE_
 PRICE_BRANCHES_COLUMNS = ["FM_SERV_CODE", "PRICE", "FM_PRICE_CATEGORY_CODE"]
 PRICE_COLUMNS = ["FM_SERV_CODE", "PRICE", "DATE_FROM"]  # legacy двухлистовый xlsx
 
-# Аналитические коды из рабочей выгрузки 11635 (в форме полей пока нет).
-DEFAULT_CODE_AN = "web"
-DEFAULT_CODE_AN2 = "web"
-DEFAULT_CODE_AN3 = "Анализы"
-
+# CODE_AN* в эталоне 11635 были web/web/Анализы, но это значения конкретной
+# лабораторной выгрузки, не правило для всех заявок. Полей в форме нет —
+# оставляем пустыми текстовыми колонками (не boolean), пока не будет правила.
 TEXT_COLUMNS = {
     "CODE", "INSURANCE_TYPE", "LABEL", "SHORT_LABEL", "NAME_ALTER", "DESCRIPTION",
     "SERVGRP_CODE", "TAXE_CODE", "DEP_CODE", "STATE", "SEX", "SERV_TYPE", "SERV_EXT_TYPE",
@@ -238,9 +236,9 @@ def build_serv_fields_row(req: ServiceRequestIn, code: str) -> list:
         org_code_for(first_branch, org_map) if first_branch else "",
         "",
         cyrillic_minzdrav_code(req.minzdrav.code if req.minzdrav else None),
-        DEFAULT_CODE_AN,
-        DEFAULT_CODE_AN2,
-        DEFAULT_CODE_AN3,
+        "",  # CODE_AN — пусто, пока нет правила заполнения
+        "",  # CODE_AN2
+        "",  # CODE_AN3
         name_alter,
         "",  # EXAM_* / MODELS — пустые текстовые
         "",
