@@ -1258,7 +1258,8 @@ class TestMisDownload14:
         assert price.status_code == 200
         assert 'filename="Price_3_Branches.xls"' in price.headers.get("content-disposition", "")
 
-    def test_unit_builders_match_11000_style_headers(self):
+    def test_serv_fields_cyrillic_minzdrav_and_price_filename_one_branch(self):
+        """Заголовки SERV_FIELDS, кириллическая А в MINZDRAV, Price_1_Branches.xls."""
         from app.schemas import ServiceRequestIn
         from app.services.medialog_export import (
             SERV_FIELDS_COLUMNS,

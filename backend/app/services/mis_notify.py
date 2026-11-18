@@ -11,7 +11,7 @@ from ..models import RequestStatus, ServiceRequest
 from ..schemas import ServiceRequestIn
 from ..services import email_service
 from ..services.email_service import render_template
-from ..services.medialog_export import build_import_workbook, resolve_service_code
+from ..services.medialog_export import resolve_service_code
 
 logger = logging.getLogger("price_form.mis_notify")
 
@@ -57,29 +57,6 @@ def mis_recipients(initiator_email: str, approvers_map: dict) -> list[str]:
 
 def _service_name(payload: dict | None) -> str:
     return str((payload or {}).get("name") or "Заявка")
-
-
-def build_workbook_safe(payload: dict | None, *, generated_code_hint: str = "") -> bytes | None:
-    try:
-        req_in = ServiceRequestIn.model_validate(payload or {})
-        return build_import_workbook(req_in, generated_code_hint=generated_code_hint)
-    except Exception:
-        logger.exception("Не удалось собрать файл импорта МИС из payload")
-        return None
-
-
-def build_workbook_for_entity(db: Session, entity: ServiceRequest) -> bytes | None:
-    try:
-        req_in = ServiceRequestIn.model_validate(entity.payload or {})
-        code = resolve_service_code(db, entity, req_in)
-        return build_import_workbook(
-            req_in,
-            generated_code_hint=code,
-            date_from=entity.updated_at,
-        )
-    except Exception:
-        logger.exception("Не удалось собрать файл импорта МИС из заявки %s", getattr(entity, "id", "?"))
-        return None
 
 
 def send_mis_import_email(
