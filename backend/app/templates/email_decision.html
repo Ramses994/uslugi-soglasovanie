@@ -29,12 +29,19 @@
           <p style="margin:0 0 12px 0;color:#8a8f98;font-size:13px;">Комментарий не указан.</p>
           {% endif %}
           {% if status == 'approved' %}
-          <p style="margin:0;color:#1a1a1a;font-size:14px;">
-            Все согласующие подтвердили заявку. К письму приложен xlsx с двумя листами.
-            Сначала «Услуги → Импорт → Импорт услуг» (лист «Импорт услуг»), затем
-            «Услуги → Импорт → Импорт прейскурантов» (лист «Импорт прейскурантов», колонки FM_SERV_CODE и PRICE).
-            Если окно импорта читает только первый лист — сохраните второй лист отдельным файлом.
+          <p style="margin:0 0 12px 0;color:#1a1a1a;font-size:14px;">
+            Все согласующие подтвердили заявку. Нужно завести услугу и цены в МИС «Медиалог».
           </p>
+          <p style="margin:0 0 12px 0;color:#1a1a1a;font-size:14px;">
+            Файлы импорта скачайте в карточке заявки кнопкой
+            «Скачать файлы для Медиалога» (сначала <b>SERV_FIELDS.xls</b> → Импорт услуг,
+            затем <b>Price_N_Branches.xls</b> → Импорт прейскурантов).
+          </p>
+          {% if card_url or app_url %}
+          <p style="margin:0;font-size:14px;">
+            <a href="{{ card_url or app_url }}" style="color:#0f3d73;">Открыть форму согласования</a>
+          </p>
+          {% endif %}
           {% elif status == 'rework' %}
           <p style="margin:0;color:#1a1a1a;font-size:14px;">Исправьте заявку в веб-форме и отправьте повторно на согласование.</p>
           {% elif status == 'rejected' %}

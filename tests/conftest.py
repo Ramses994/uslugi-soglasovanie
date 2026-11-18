@@ -71,7 +71,11 @@ def client(tmp_path, monkeypatch):
     shutil.copy(ROOT / "data" / "approvers.json", approvers_path)
     branches_path = tmp_path / "branches.json"
     branches_path.write_text(
-        json.dumps([{"id": "kurkino", "name": "Куркино"}, {"id": "kashirka", "name": "Каширка"}], ensure_ascii=False),
+        json.dumps([
+            {"id": "kurkino", "name": "Куркино", "mis_org_code": "Куркино", "mis_price_category_code": "Куркино"},
+            {"id": "kashirka", "name": "Каширка", "mis_org_code": "Каширка", "mis_price_category_code": "Каширка"},
+            {"id": "kurkino-2", "name": "Куркино 2 (взр.)", "mis_org_code": "Куркино 2 (взр.)", "mis_price_category_code": "Куркино 2 (взр.)"},
+        ], ensure_ascii=False),
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "approvers_json", str(approvers_path))

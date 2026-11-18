@@ -204,6 +204,9 @@
                   <button type="button" class="text-sm text-amber-700 hover:underline"
                           x-show="canSkipStage(r)"
                           @click="skipStage(r)">Пропустить этот этап</button>
+                  <button type="button" class="text-sm text-emerald-700 hover:underline"
+                          x-show="canDownloadMisFiles(r)"
+                          @click="downloadMisFiles(r)">Скачать файлы для Медиалога</button>
                   <button type="button" class="text-sm text-red-500 hover:underline"
                           x-show="user.is_admin"
                           @click="deleteRequest(r.id)">Удалить</button>
@@ -801,6 +804,6 @@
   </template>
 </div>
 
-<script src="app.js?v=13"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

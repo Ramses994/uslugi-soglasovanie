@@ -329,6 +329,42 @@ function app() {
     canSkipStage(r) {
       return !!(this.user?.is_admin && r && r.status === "pending" && (r.approval_chain || []).length);
     },
+    canDownloadMisFiles(r) {
+      return !!(this.user?.is_admin && r && r.status === "approved");
+    },
+    async _downloadBinary(path, fallbackName) {
+      const res = await fetch(API_BASE + path, { credentials: "include" });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const body = await res.json();
+          detail = formatApiErrorDetail(body.detail) || detail;
+        } catch (_) { /* binary error body */ }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      let filename = fallbackName;
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = /filename=\"?([^\";]+)\"?/i.exec(cd);
+      if (m) filename = m[1];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    async downloadMisFiles(r) {
+      try {
+        await this._downloadBinary(`/api/requests/${r.id}/mis-export/serv-fields.xls`, "SERV_FIELDS.xls");
+        await this._downloadBinary(`/api/requests/${r.id}/mis-export/price.xls`, "Price_Branches.xls");
+        this.notify("success", "Файлы для Медиалога", "Скачаны SERV_FIELDS.xls и Price_N_Branches.xls.");
+      } catch (e) {
+        this.notify("error", "Не удалось скачать файлы МИС", e.message);
+      }
+    },
     async skipStage(r) {
       const comment = window.prompt("Причина пропуска текущего этапа (обязательно):", "Согласующий в отпуске");
       if (comment === null) return;

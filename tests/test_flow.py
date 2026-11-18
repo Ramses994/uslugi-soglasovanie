@@ -133,27 +133,18 @@ class TestApprovalFlow:
         status_after_2 = logged_in_client.get(f"/api/requests/{request_id}").json()["status"]
         assert status_after_2 == "approved"
 
-        attachment_mails = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert len(attachment_mails) == 1
-        recips = attachment_mails[0]["to"]
+        # Финальное письмо — текст без вложения; файлы скачиваются из карточки.
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+        final_mails = [
+            m for m in logged_in_client.sent_emails
+            if m["kind"] == "mail" and "Согласовано" in m["subject"] and "заведите" in m["subject"].lower()
+        ]
+        assert len(final_mails) == 1
+        recips = final_mails[0]["to"]
         assert "mis.admin@clinic.local" in recips
         assert "ivanov@clinic.local" in recips
+        assert "Скачать файлы для Медиалога" in final_mails[0]["html_body"]
         assert logged_in_client.get(f"/api/requests/{request_id}").json()["mis_notified_at"]
-        wb = openpyxl.load_workbook(io.BytesIO(attachment_mails[0]["attachment_bytes"]))
-        ws = wb.active
-        header = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-        assert header[:3] == ["CODE", "INSURANCE_TYPE", "LABEL"]
-        assert "EXAM_GR_CODE" in header
-        assert header[-1] == "MODELS_CODE"
-        assert "Импорт прейскурантов" in wb.sheetnames
-        rows = list(ws.iter_rows(min_row=2, values_only=True))
-        # 2 филиала x (ДМС+ОМС, т.к. price_list='both') = 4 строки
-        assert len(rows) == 4
-        assert all(row[0] for row in rows)
-        assert all(row[2] == "Приём врача-терапевта повторный" for row in rows)
-        assert all(row[6] == "НДС-0" for row in rows)
-        assert all(row[7] == "000" for row in rows)
-        assert all(row[18] == "B01.047.002" for row in rows)  # MINZDRAV_CODE
 
     def test_repeat_click_on_same_link_is_idempotent(self, logged_in_client):
         r = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD)
@@ -715,12 +706,17 @@ class TestSequentialChain:
         ).json()["id"]
         _approve_as(logged_in_client, "nfolomova@clinic.local")
         _approve_as(logged_in_client, "chief.doctor@clinic.local")
-        before = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert before == []
+        def _final_mis_mails():
+            return [
+                m for m in logged_in_client.sent_emails
+                if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+            ]
+
+        assert _final_mis_mails() == []
         _approve_as(logged_in_client, "osokolovskaya@clinic.local")
-        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert len(attachments) == 1
-        recips = attachments[0]["to"]
+        assert len(_final_mis_mails()) == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+        recips = _final_mis_mails()[0]["to"]
         assert "mis.admin@clinic.local" in recips
         assert "ivanov@clinic.local" in recips
         detail = logged_in_client.get(f"/api/requests/{rid}").json()
@@ -735,17 +731,25 @@ class TestSequentialChain:
         _approve_as(logged_in_client, "nfolomova@clinic.local")
         _approve_as(logged_in_client, "chief.doctor@clinic.local")
         _approve_as(logged_in_client, "osokolovskaya@clinic.local")
-        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+
+        def _final_count():
+            return len([
+                m for m in logged_in_client.sent_emails
+                if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+            ])
+
+        assert _final_count() == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
 
         skipped = logged_in_client.post(f"/api/admin/requests/{rid}/notify-mis")
         assert skipped.status_code == 200, skipped.text
         assert skipped.json()["skipped"] is True
-        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+        assert _final_count() == 1
 
         forced = logged_in_client.post(f"/api/admin/requests/{rid}/notify-mis?force=true")
         assert forced.status_code == 200, forced.text
         assert forced.json()["skipped"] is False
-        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 2
+        assert _final_count() == 2
 
     def test_rework_resubmit_sends_mis_mail_only_after_final_round(self, logged_in_client):
         _add_chain_anchors(logged_in_client)
@@ -757,12 +761,20 @@ class TestSequentialChain:
             _html_to(logged_in_client.sent_emails, "chief.doctor@clinic.local"), "rework"
         )
         _post_decision(logged_in_client, rework_url, "правьте")
-        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+
+        def _final_count():
+            return len([
+                m for m in logged_in_client.sent_emails
+                if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+            ])
+
+        assert _final_count() == 0
         logged_in_client.post(f"/api/requests/{rid}/resubmit", json={"submission_comment": "готово"})
         _approve_as(logged_in_client, "chief.doctor@clinic.local")
-        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
+        assert _final_count() == 0
         _approve_as(logged_in_client, "osokolovskaya@clinic.local")
-        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+        assert _final_count() == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
         assert logged_in_client.get(f"/api/requests/{rid}").json()["mis_notified_at"]
 
     def test_old_parallel_then_resubmit_still_sends_mis_mail(self, logged_in_client):
@@ -800,8 +812,12 @@ class TestSequentialChain:
         _approve_as(logged_in_client, "chief.doctor@clinic.local")
         _approve_as(logged_in_client, "mis.admin@clinic.local")
         _approve_as(logged_in_client, "osokolovskaya@clinic.local")
-        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert len(attachments) == 1
+        finals = [
+            m for m in logged_in_client.sent_emails
+            if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+        ]
+        assert len(finals) == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
         assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "approved"
 
     def test_empty_chain_parallel_all_approve_sends_mis_mail(self, logged_in_client):
@@ -827,7 +843,11 @@ class TestSequentialChain:
         from app.security import make_approval_token
         logged_in_client.get(f"/api/approvals/{make_approval_token(rid, 'mis_admin')}/approve")
         assert logged_in_client.get(f"/api/requests/{rid}").json()["status"] == "approved"
-        assert len([m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]) == 1
+        assert len([
+            m for m in logged_in_client.sent_emails
+            if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+        ]) == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
 
 
 class TestPrompt10Fields:
@@ -1042,8 +1062,6 @@ class TestSkipStageAndReports:
         ).json()["id"]
         _approve_as(logged_in_client, "nfolomova@clinic.local")
         _approve_as(logged_in_client, "chief.doctor@clinic.local")
-        attachments_before = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert attachments_before == []
         r = logged_in_client.post(
             f"/api/requests/{rid}/skip-stage",
             json={"comment": "Соколовская в отпуске, пропускаем финальный этап"},
@@ -1052,8 +1070,11 @@ class TestSkipStageAndReports:
         detail = logged_in_client.get(f"/api/requests/{rid}").json()
         assert detail["status"] == "approved"
         assert detail["mis_notified_at"]
-        attachments = [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"]
-        assert len(attachments) == 1
+        assert len([
+            m for m in logged_in_client.sent_emails
+            if m["kind"] == "mail" and "заведите" in m["subject"].lower()
+        ]) == 1
+        assert [m for m in logged_in_client.sent_emails if m["kind"] == "mail+attachment"] == []
         # повторный skip на approved запрещён
         assert logged_in_client.post(
             f"/api/requests/{rid}/skip-stage", json={"comment": "ещё раз"}
@@ -1146,6 +1167,136 @@ class TestSkipStageAndReports:
         assert first["admin"]["skipped"] is False
         assert second["admin"]["skipped"] is True
         assert second["initiators"]["skipped"] is True
+
+
+class TestMisDownload14:
+    def _approve_to_done(self, client):
+        rid = client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        _approve_as(client, "chief.doctor@clinic.local")
+        _approve_as(client, "mis.admin@clinic.local")
+        assert client.get(f"/api/requests/{rid}").json()["status"] == "approved"
+        return rid
+
+    def test_download_forbidden_for_non_admin(self, client):
+        client.post("/api/auth/login", json={"login": "ivanov", "password": "any"})
+        rid = self._approve_to_done(client)
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"login": "petrova", "password": "any"})
+        assert client.get(f"/api/requests/{rid}/mis-export/serv-fields.xls").status_code == 403
+        assert client.get(f"/api/requests/{rid}/mis-export/price.xls").status_code == 403
+
+    def test_download_409_when_not_approved(self, logged_in_client):
+        rid = logged_in_client.post("/api/requests", json=SAMPLE_REQUEST_PAYLOAD).json()["id"]
+        assert logged_in_client.get(f"/api/requests/{rid}/mis-export/serv-fields.xls").status_code == 409
+        assert logged_in_client.get(f"/api/requests/{rid}/mis-export/price.xls").status_code == 409
+
+    def test_serv_fields_and_price_xls_content(self, logged_in_client):
+        import xlrd
+        from app.services.medialog_export import SERV_FIELDS_COLUMNS, PRICE_BRANCHES_COLUMNS
+
+        rid = self._approve_to_done(logged_in_client)
+        serv = logged_in_client.get(f"/api/requests/{rid}/mis-export/serv-fields.xls")
+        assert serv.status_code == 200, serv.text
+        assert 'filename="SERV_FIELDS.xls"' in serv.headers.get("content-disposition", "")
+        book = xlrd.open_workbook(file_contents=serv.content)
+        sh = book.sheet_by_index(0)
+        headers = [sh.cell_value(0, c) for c in range(sh.ncols)]
+        # Эталон Downloads/SERV_FIELDS.xls: CODE_AN* перед NAME_ALTER, после MINZDRAV_CODE
+        assert headers == SERV_FIELDS_COLUMNS
+        assert headers.index("CODE_AN") < headers.index("NAME_ALTER")
+        assert headers.index("NAME_ALTER") == headers.index("MINZDRAV_CODE") + 4
+        assert sh.nrows == 2  # header + 1 service row
+        assert sh.name == "Импорт_услуги"
+        code_an_col = headers.index("CODE_AN")
+        exam_col = headers.index("EXAM_GR_CODE")
+        # значения из рабочей выгрузки 11635 (в форме полей пока нет)
+        assert sh.cell_value(1, code_an_col) == "web"
+        assert sh.cell_value(1, headers.index("CODE_AN2")) == "web"
+        assert sh.cell_value(1, headers.index("CODE_AN3")) == "Анализы"
+        assert sh.cell_type(1, code_an_col) == xlrd.XL_CELL_TEXT
+        assert sh.cell_value(1, exam_col) == ""
+        assert sh.cell_type(1, exam_col) in (xlrd.XL_CELL_TEXT, xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK)
+        # PERIODICAL / PRICE_FOR_CHANGE — числа, как в эталоне
+        assert sh.cell_value(1, headers.index("PERIODICAL")) == 0
+        assert sh.cell_type(1, headers.index("PERIODICAL")) == xlrd.XL_CELL_NUMBER
+        assert sh.cell_value(1, headers.index("TAXE_CODE")) == "НДС-0"
+
+        price = logged_in_client.get(f"/api/requests/{rid}/mis-export/price.xls")
+        assert price.status_code == 200
+        assert 'filename="Price_2_Branches.xls"' in price.headers.get("content-disposition", "")
+        pbook = xlrd.open_workbook(file_contents=price.content)
+        psh = pbook.sheet_by_index(0)
+        pheaders = [psh.cell_value(0, c) for c in range(psh.ncols)]
+        assert pheaders == PRICE_BRANCHES_COLUMNS
+        assert psh.name == "Import"
+        assert psh.nrows == 3  # header + 2 branches
+        cats = {str(psh.cell_value(r, 2)) for r in range(1, psh.nrows)}
+        # CODE в FM_PRICE_CATEGORY = имя филиала (не ID 1/2/4)
+        assert cats == {"Куркино", "Каширка"}
+        # CODE совпадает между файлами
+        assert str(sh.cell_value(1, 0)).rstrip(".0") == str(psh.cell_value(1, 0)).rstrip(".0") or (
+            str(sh.cell_value(1, 0)) == str(psh.cell_value(1, 0))
+        )
+
+    def test_price_filename_for_three_branches(self, logged_in_client):
+        payload = {
+            **SAMPLE_REQUEST_PAYLOAD,
+            "all_branches": False,
+            "prices": [
+                {"branch": "Куркино", "price": 100},
+                {"branch": "Каширка", "price": 100},
+                {"branch": "Куркино 2 (взр.)", "price": 100},
+            ],
+        }
+        rid = logged_in_client.post("/api/requests", json=payload).json()["id"]
+        _approve_as(logged_in_client, "chief.doctor@clinic.local")
+        _approve_as(logged_in_client, "mis.admin@clinic.local")
+        price = logged_in_client.get(f"/api/requests/{rid}/mis-export/price.xls")
+        assert price.status_code == 200
+        assert 'filename="Price_3_Branches.xls"' in price.headers.get("content-disposition", "")
+
+    def test_unit_builders_match_11000_style_headers(self):
+        from app.schemas import ServiceRequestIn
+        from app.services.medialog_export import (
+            SERV_FIELDS_COLUMNS,
+            build_price_branches_xls,
+            build_serv_fields_xls,
+            price_branches_filename,
+        )
+        import xlrd
+
+        req = ServiceRequestIn.model_validate({
+            **SAMPLE_REQUEST_PAYLOAD,
+            "mis_code": "11000",
+            "price_list": "dms",
+            "all_branches": False,
+            "prices": [{"branch": "Куркино", "price": 1500}],
+            "alt_name": "Альт",
+        })
+        serv = build_serv_fields_xls(req, generated_code_hint="11000")
+        book = xlrd.open_workbook(file_contents=serv)
+        sh = book.sheet_by_index(0)
+        assert [sh.cell_value(0, c) for c in range(sh.ncols)] == SERV_FIELDS_COLUMNS
+        assert sh.cell_value(1, SERV_FIELDS_COLUMNS.index("NAME_ALTER")) == "Альт"
+        # та же нормализация лат. A → кир. А, что чинили для 11000
+        req_a = ServiceRequestIn.model_validate({
+            **SAMPLE_REQUEST_PAYLOAD,
+            "mis_code": "11000",
+            "minzdrav": {"code": "A09.05.230", "name": "Цистатин С"},
+            "prices": [{"branch": "Куркино", "price": 1500}],
+        })
+        serv_a = build_serv_fields_xls(req_a, generated_code_hint="11000")
+        sh_a = xlrd.open_workbook(file_contents=serv_a).sheet_by_index(0)
+        mz = sh_a.cell_value(1, SERV_FIELDS_COLUMNS.index("MINZDRAV_CODE"))
+        assert mz.startswith("А"), mz  # U+0410, не латинская A
+        assert mz == "А09.05.230"
+        assert mz[0] != "A"
+
+        payload, name = build_price_branches_xls(req, generated_code_hint="11000")
+        assert name == price_branches_filename(1) == "Price_1_Branches.xls"
+        psh = xlrd.open_workbook(file_contents=payload).sheet_by_index(0)
+        assert psh.cell_value(1, 2) == "Куркино"
+        assert len(payload) > 0
 
 
 

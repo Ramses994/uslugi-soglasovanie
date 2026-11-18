@@ -1,4 +1,4 @@
-"""Финальное письмо в МИС: файл импорта + получатели (инициатор, mis_admin, админы формы)."""
+"""Финальное уведомление в МИС: текстовое письмо без вложений + ссылка на карточку."""
 from __future__ import annotations
 
 import logging
@@ -17,7 +17,7 @@ logger = logging.getLogger("price_form.mis_notify")
 
 
 def mis_recipients(initiator_email: str, approvers_map: dict) -> list[str]:
-    """Кому уходит файл импорта после полного согласования.
+    """Кому уходит уведомление после полного согласования.
 
     Нельзя опираться только на запись mis_admin в approvers.json — в боевом
     каталоге её нет. FORM_ADMIN_LOGINS тоже часто не совпадает с id согласующего
@@ -91,7 +91,7 @@ def send_mis_import_email(
     approver_name: str = "",
     approver_role: str = "",
 ) -> dict:
-    """Отправляет письмо с xlsx. Возвращает {ok, skipped, recipients, error}."""
+    """Текстовое письмо без вложений: услуга согласована, скачать файлы в форме."""
     if entity.status != RequestStatus.approved:
         return {"ok": False, "skipped": True, "recipients": [], "error": "Заявка не в статусе approved"}
     if entity.mis_notified_at and not force:
@@ -103,10 +103,20 @@ def send_mis_import_email(
             "mis_notified_at": entity.mis_notified_at.isoformat() if entity.mis_notified_at else None,
         }
 
+    settings = get_settings()
     payload = entity.payload or {}
     name = _service_name(payload)
-    xlsx = build_workbook_for_entity(db, entity)
+    # Код услуги выделяем заранее — чтобы к моменту скачивания он уже был в БД.
+    try:
+        req_in = ServiceRequestIn.model_validate(payload)
+        resolve_service_code(db, entity, req_in)
+        db.add(entity)
+        db.commit()
+    except Exception:
+        logger.exception("Не удалось закрепить CODE за заявкой %s перед письмом", entity.id)
+
     recipients = mis_recipients(entity.initiator_email, approvers_map)
+    card_url = f"{settings.app_base_url.rstrip('/')}/#requests"
     html = render_template(
         "email_decision.html",
         status=RequestStatus.approved.value,
@@ -116,31 +126,24 @@ def send_mis_import_email(
         approver_role=approver_role or "",
         decision="approve",
         comment=None,
+        app_url=settings.app_base_url,
+        card_url=card_url,
+        download_hint=True,
     )
     if not recipients:
         logger.error("Нет получателей письма МИС для заявки %s", entity.id)
         return {"ok": False, "skipped": False, "recipients": [], "error": "Пустой список получателей"}
 
-    if xlsx is None:
-        ok = email_service.try_send_email(
-            to=recipients,
-            subject=f"[Согласовано] {name} — не удалось сформировать файл импорта",
-            html_body=html,
-        )
-        return {"ok": ok, "skipped": False, "recipients": recipients, "error": None if ok else "SMTP/файл"}
-
-    ok = email_service.try_send_email_with_attachment(
+    ok = email_service.try_send_email(
         to=recipients,
-        subject=f"[Согласовано] {name} — файл для импорта в Медиалог",
+        subject=f"[Согласовано] {name} — заведите в МИС Медиалог",
         html_body=html,
-        attachment_bytes=xlsx,
-        attachment_filename=f"import_{entity.id[:8]}.xlsx",
     )
     if ok:
         entity.mis_notified_at = datetime.utcnow()
         db.add(entity)
         db.commit()
-        logger.info("Письмо МИС отправлено по заявке %s на %s", entity.id, recipients)
+        logger.info("Письмо МИС (без вложения) отправлено по заявке %s на %s", entity.id, recipients)
     else:
         logger.error("SMTP не принял письмо МИС по заявке %s получателям %s", entity.id, recipients)
     return {"ok": ok, "skipped": False, "recipients": recipients, "error": None if ok else "SMTP"}

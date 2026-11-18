@@ -2,16 +2,19 @@
   {
     "id": "куркино",
     "name": "Куркино",
-    "mis_org_code": "Куркино"
+    "mis_org_code": "Куркино",
+    "mis_price_category_code": "Куркино"
   },
   {
     "id": "каширка",
     "name": "Каширка",
-    "mis_org_code": "Каширка"
+    "mis_org_code": "Каширка",
+    "mis_price_category_code": "Каширка"
   },
   {
     "id": "куркино-2-взр",
     "name": "Куркино 2 (взр.)",
-    "mis_org_code": "Куркино 2 (взр.)"
+    "mis_org_code": "Куркино 2 (взр.)",
+    "mis_price_category_code": "Куркино 2 (взр.)"
   }
 ]

@@ -38,6 +38,7 @@ class BranchIn(BaseModel):
     id: str
     name: str
     mis_org_code: str | None = None
+    mis_price_category_code: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +100,8 @@ def delete_approver(approver_id: str, user=Depends(require_admin)):
 def _branch_payload(body: BranchIn) -> dict:
     data = body.model_dump()
     data["mis_org_code"] = (data.get("mis_org_code") or data.get("name") or "").strip()
+    code = data.get("mis_price_category_code")
+    data["mis_price_category_code"] = str(code).strip() if code not in (None, "") else None
     return data
 
 

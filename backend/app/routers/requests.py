@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,11 @@ from ..services.approval_chain import (
 from ..services.approval_history import list_for_request, record as record_history, serialize as serialize_history
 from ..services import email_service
 from ..services.email_service import render_template
+from ..services.medialog_export import (
+    build_price_branches_xls,
+    build_serv_fields_xls,
+    resolve_service_code,
+)
 from ..services.mis_notify import mis_recipients, send_mis_import_email
 from ..services.stage_status import stage_summary
 from ..services.xlsx_import import parse_xlsx_requests
@@ -468,6 +473,52 @@ def skip_current_stage(
         "stage_label": stage_summary(entity, approvers_map)["label"],
         "skipped_approver_id": current_id,
     }
+
+
+def _approved_for_mis_export(db: Session, request_id: str) -> tuple[ServiceRequest, ServiceRequestIn, str]:
+    entity = db.get(ServiceRequest, request_id)
+    if not entity:
+        raise HTTPException(404, "Заявка не найдена")
+    if entity.status != RequestStatus.approved:
+        raise HTTPException(409, "Файлы для Медиалога доступны только для согласованных заявок")
+    try:
+        req_in = ServiceRequestIn.model_validate(entity.payload or {})
+    except ValidationError as exc:
+        raise HTTPException(409, f"Payload заявки не проходит схему: {exc}") from exc
+    code = resolve_service_code(db, entity, req_in)
+    db.add(entity)
+    db.commit()
+    return entity, req_in, code
+
+
+@router.get("/{request_id}/mis-export/serv-fields.xls")
+def download_serv_fields_xls(
+    request_id: str,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(require_admin),
+):
+    _, req_in, code = _approved_for_mis_export(db, request_id)
+    payload = build_serv_fields_xls(req_in, generated_code_hint=code)
+    return Response(
+        content=payload,
+        media_type="application/vnd.ms-excel",
+        headers={"Content-Disposition": 'attachment; filename="SERV_FIELDS.xls"'},
+    )
+
+
+@router.get("/{request_id}/mis-export/price.xls")
+def download_price_branches_xls(
+    request_id: str,
+    db: Session = Depends(get_db),
+    user: UserProfile = Depends(require_admin),
+):
+    _, req_in, code = _approved_for_mis_export(db, request_id)
+    payload, filename = build_price_branches_xls(req_in, generated_code_hint=code)
+    return Response(
+        content=payload,
+        media_type="application/vnd.ms-excel",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{request_id}")

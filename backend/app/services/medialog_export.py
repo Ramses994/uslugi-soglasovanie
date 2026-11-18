@@ -1,8 +1,7 @@
-"""Генерация xlsx под «Услуги → Импорт → Импорт услуг» в МИС Медиалог.
+"""Генерация файлов импорта в МИС Медиалог (два отдельных .xls).
 
-Эталон колонок — успешно загруженный файл `11000_услуга_импорт_текстовые_коды.xls`
-(1 обработана / 1 создана). Цены в FM_SERV нет: второй лист — заготовка
-«Импорт прейскурантов» (FM_SERVPRICE), порядок импорта указан в письме.
+SERV_FIELDS.xls — карточка услуги (IMP_SERV_FIELDS).
+Price_{N}_Branches.xls — цены по филиалам (категории FM_PRICE_CATEGORY).
 """
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
+import xlwt
 from openpyxl import Workbook
 from openpyxl.styles import numbers
 from sqlalchemy.orm import Session
@@ -35,14 +35,35 @@ SHORT_LABEL_MAX = 100
 DESCRIPTION_MAX = 2000
 GENERATED_CODE_START = 11603
 
-# 24 колонки успешного ручного импорта (без DEVISE_CODE и без служебных _ЦЕНА/_ФИЛИАЛ).
-SERV_COLUMNS = [
-    "CODE", "INSURANCE_TYPE", "LABEL", "SHORT_LABEL", "DESCRIPTION", "SERVGRP_CODE",
-    "TAXE_CODE", "DEP_CODE", "STATE", "SEX", "SERV_TYPE", "SERV_EXT_TYPE", "PERIODICAL",
-    "PRICE_FOR_CHANGE", "PRICE_TYPE", "INVOICE_TYPE", "ORG_CODE", "OMS_CODE",
-    "MINZDRAV_CODE", "EXAM_GR_CODE", "EXAM_CODE", "EXAM_NAME", "EXAM_DUREE", "MODELS_CODE",
+# Порядок заголовков — эталон Downloads/SERV_FIELDS.xls (IMP_SERV_FIELDS, Cystatin C / 11635).
+SERV_FIELDS_COLUMNS = [
+    "CODE", "INSURANCE_TYPE", "LABEL", "SHORT_LABEL", "DESCRIPTION",
+    "SERVGRP_CODE", "TAXE_CODE", "DEP_CODE", "STATE", "SEX", "SERV_TYPE", "SERV_EXT_TYPE",
+    "PERIODICAL", "PRICE_FOR_CHANGE", "PRICE_TYPE", "INVOICE_TYPE", "ORG_CODE", "OMS_CODE",
+    "MINZDRAV_CODE", "CODE_AN", "CODE_AN2", "CODE_AN3", "NAME_ALTER",
+    "EXAM_GR_CODE", "EXAM_CODE", "EXAM_NAME", "EXAM_DUREE", "MODELS_CODE",
 ]
-PRICE_COLUMNS = ["FM_SERV_CODE", "PRICE", "DATE_FROM"]
+SERV_FIELDS_SHEET = "Импорт_услуги"
+PRICE_BRANCHES_SHEET = "Import"
+# Совместимость со старыми тестами / двухлистовым xlsx.
+SERV_COLUMNS = [c for c in SERV_FIELDS_COLUMNS if c not in ("NAME_ALTER", "CODE_AN", "CODE_AN2", "CODE_AN3")]
+PRICE_BRANCHES_COLUMNS = ["FM_SERV_CODE", "PRICE", "FM_PRICE_CATEGORY_CODE"]
+PRICE_COLUMNS = ["FM_SERV_CODE", "PRICE", "DATE_FROM"]  # legacy двухлистовый xlsx
+
+# Аналитические коды из рабочей выгрузки 11635 (в форме полей пока нет).
+DEFAULT_CODE_AN = "web"
+DEFAULT_CODE_AN2 = "web"
+DEFAULT_CODE_AN3 = "Анализы"
+
+TEXT_COLUMNS = {
+    "CODE", "INSURANCE_TYPE", "LABEL", "SHORT_LABEL", "NAME_ALTER", "DESCRIPTION",
+    "SERVGRP_CODE", "TAXE_CODE", "DEP_CODE", "STATE", "SEX", "SERV_TYPE", "SERV_EXT_TYPE",
+    "PRICE_TYPE", "INVOICE_TYPE", "ORG_CODE", "OMS_CODE",
+    "MINZDRAV_CODE", "CODE_AN", "CODE_AN2", "CODE_AN3",
+    "EXAM_GR_CODE", "EXAM_CODE", "EXAM_NAME", "EXAM_DUREE", "MODELS_CODE",
+    "FM_SERV_CODE", "FM_PRICE_CATEGORY_CODE",
+}
+# PERIODICAL / PRICE_FOR_CHANGE в эталоне — число 0, не текст.
 
 
 def make_short_label(label: str, short_name: str | None = None) -> str:
@@ -82,14 +103,17 @@ def insurance_types_for(req: ServiceRequestIn) -> list[str]:
     return [_PRICE_LIST_MAP[req.price_list.value]]
 
 
-def _load_org_code_map() -> dict[str, str]:
+def _load_branches() -> list[dict]:
     settings = get_settings()
     path = Path(settings.branches_json)
     if not path.exists():
-        return {}
-    items = json.loads(path.read_text(encoding="utf-8"))
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_org_code_map() -> dict[str, str]:
     out: dict[str, str] = {}
-    for item in items:
+    for item in _load_branches():
         name = str((item or {}).get("name") or "").strip()
         if not name:
             continue
@@ -99,9 +123,33 @@ def _load_org_code_map() -> dict[str, str]:
     return out
 
 
+def _load_price_category_map() -> dict[str, str]:
+    """CODE в FM_PRICE_CATEGORY = читаемое имя филиала (не FM_PRICE_CATEGORY_ID)."""
+    out: dict[str, str] = {}
+    for item in _load_branches():
+        name = str((item or {}).get("name") or "").strip()
+        if not name:
+            continue
+        # Явный CODE, иначе mis_org_code / name — в этой инсталляции совпадают с LABEL.
+        code = (
+            str((item or {}).get("mis_price_category_code") or "").strip()
+            or str((item or {}).get("mis_org_code") or "").strip()
+            or name
+        )
+        out[name] = code
+        out[name.lower()] = code
+    return out
+
+
 def org_code_for(branch_name: str, mapping: dict[str, str] | None = None) -> str:
     name = (branch_name or "").strip()
     mapping = mapping if mapping is not None else _load_org_code_map()
+    return mapping.get(name) or mapping.get(name.lower()) or name
+
+
+def price_category_for(branch_name: str, mapping: dict[str, str] | None = None) -> str:
+    name = (branch_name or "").strip()
+    mapping = mapping if mapping is not None else _load_price_category_map()
     return mapping.get(name) or mapping.get(name.lower()) or name
 
 
@@ -143,13 +191,103 @@ def _as_text(value) -> str:
     return str(value)
 
 
+def _xls_text_style():
+    return xlwt.easyxf(num_format_str="@")
+
+
+def _write_xls_sheet(headers: list[str], rows: list[list], sheet_name: str = "Sheet1") -> bytes:
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws = wb.add_sheet(sheet_name[:31] or "Sheet1")
+    text_style = _xls_text_style()
+    for c, header in enumerate(headers):
+        ws.write(0, c, header, text_style)
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row):
+            header = headers[c] if c < len(headers) else ""
+            if header in TEXT_COLUMNS or value == "" or value is None:
+                ws.write(r, c, _as_text(value), text_style)
+            else:
+                ws.write(r, c, value)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def build_serv_fields_row(req: ServiceRequestIn, code: str) -> list:
+    org_map = _load_org_code_map()
+    first_branch = req.prices[0].branch if req.prices else ""
+    ins = insurance_types_for(req)[0]
+    name_alter = (req.alt_name or "").strip() or (req.name or "").strip()
+    return [
+        _as_text(code),
+        ins,
+        req.name,
+        make_short_label(req.name, req.short_name),
+        description_from_request(req),
+        _as_text(req.service_group or ""),
+        DEFAULT_TAXE_CODE,
+        _as_text((req.department_code or "").strip() or DEFAULT_DEP_CODE),
+        "A",
+        _SEX_MAP[req.sex_limit.value],
+        "S",
+        serv_ext_type(req),
+        0,  # PERIODICAL — число, как в эталоне SERV_FIELDS.xls
+        0,  # PRICE_FOR_CHANGE
+        "S",
+        "S",
+        org_code_for(first_branch, org_map) if first_branch else "",
+        "",
+        cyrillic_minzdrav_code(req.minzdrav.code if req.minzdrav else None),
+        DEFAULT_CODE_AN,
+        DEFAULT_CODE_AN2,
+        DEFAULT_CODE_AN3,
+        name_alter,
+        "",  # EXAM_* / MODELS — пустые текстовые
+        "",
+        "",
+        "",
+        "",
+    ]
+
+
+def build_serv_fields_xls(req: ServiceRequestIn, generated_code_hint: str = "") -> bytes:
+    """Одна строка на услугу заявки → SERV_FIELDS.xls."""
+    code = (req.mis_code or "").strip() or (generated_code_hint or "").strip()
+    return _write_xls_sheet(
+        SERV_FIELDS_COLUMNS,
+        [build_serv_fields_row(req, code)],
+        SERV_FIELDS_SHEET,
+    )
+
+
+def build_price_branch_rows(req: ServiceRequestIn, code: str) -> list[list]:
+    cat_map = _load_price_category_map()
+    rows = []
+    for bp in req.prices:
+        cat = price_category_for(bp.branch, cat_map)
+        rows.append([_as_text(code), bp.price, _as_text(cat)])
+    return rows
+
+
+def price_branches_filename(branch_count: int) -> str:
+    return f"Price_{int(branch_count)}_Branches.xls"
+
+
+def build_price_branches_xls(req: ServiceRequestIn, generated_code_hint: str = "") -> tuple[bytes, str]:
+    """Цены по филиалам → Price_{N}_Branches.xls (CODE категории = имя филиала)."""
+    code = (req.mis_code or "").strip() or (generated_code_hint or "").strip()
+    rows = build_price_branch_rows(req, code)
+    payload = _write_xls_sheet(PRICE_BRANCHES_COLUMNS, rows, PRICE_BRANCHES_SHEET)
+    return payload, price_branches_filename(len(rows))
+
+
 def build_import_workbook(
     req: ServiceRequestIn,
     generated_code_hint: str = "",
     *,
     date_from: date | datetime | None = None,
 ) -> bytes:
-    mapping = _load_org_code_map()
+    """Legacy: один xlsx с двумя листами (для старых тестов/совместимости)."""
     code = (req.mis_code or "").strip() or (generated_code_hint or "").strip()
     short = make_short_label(req.name, req.short_name)
     description = description_from_request(req)
@@ -161,47 +299,23 @@ def build_import_workbook(
     ext = serv_ext_type(req)
     when = date_from.date() if isinstance(date_from, datetime) else (date_from or date.today())
     date_str = when.isoformat()
+    mapping = _load_org_code_map()
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Импорт услуг"
     ws.append(SERV_COLUMNS)
-
     exam_idx = [SERV_COLUMNS.index(c) + 1 for c in SERV_COLUMNS if c.startswith("EXAM") or c == "MODELS_CODE"]
-    code_col = 1
-
     for bp in req.prices:
         org = org_code_for(bp.branch, mapping)
         for ins in ins_types:
-            row = [
-                _as_text(code),
-                ins,
-                req.name,
-                short,
-                description,
-                grp,
-                taxe,
-                dep,
-                "A",
-                _SEX_MAP[req.sex_limit.value],
-                "S",
-                ext,
-                "0",
-                "0",
-                "S",
-                "S",
-                org,
-                "",
-                minz,
-                "",
-                "",
-                "",
-                "",
-                "",
-            ]
-            ws.append(row)
+            ws.append([
+                _as_text(code), ins, req.name, short, description, grp, taxe, dep,
+                "A", _SEX_MAP[req.sex_limit.value], "S", ext, "0", "0", "S", "S",
+                org, "", minz, "", "", "", "", "",
+            ])
             r = ws.max_row
-            ws.cell(r, code_col).number_format = numbers.FORMAT_TEXT
+            ws.cell(r, 1).number_format = numbers.FORMAT_TEXT
             for col in exam_idx:
                 cell = ws.cell(r, col)
                 cell.value = ""
